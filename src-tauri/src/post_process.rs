@@ -60,24 +60,31 @@ pub fn process(segments: Vec<Segment>) -> Vec<Segment> {
     }
 
     let mut result = segments;
+    log::debug!("post_process: input {} segments", result.len());
 
     // 1. Merge segments (context-aware + standard gap merge)
     result = merge_segments(result);
+    log::debug!("post_process: after merge_segments -> {} segments", result.len());
 
     // 2. Enforce duration bounds
     result = enforce_duration(result);
+    log::debug!("post_process: after enforce_duration -> {} segments", result.len());
 
     // 3. CPS control — split oversized segments
     result = enforce_cps(result);
+    log::debug!("post_process: after enforce_cps -> {} segments", result.len());
 
     // 4. Line formatting (max 2 lines, balanced split)
     result = format_lines(result);
+    log::debug!("post_process: after format_lines -> {} segments", result.len());
 
     // 5. Fix overlaps (final pass)
     result = fix_overlaps(result);
+    log::debug!("post_process: after fix_overlaps -> {} segments", result.len());
 
     // 6. Round timestamps
     result = round_timestamps(result);
+    log::debug!("post_process: after round_timestamps -> {} segments", result.len());
 
     result
 }
