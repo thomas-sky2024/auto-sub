@@ -267,7 +267,7 @@ fn enforce_cps(segments: Vec<Segment>) -> Vec<Segment> {
     result
 }
 
-/// Split a segment at the best boundary point.
+/// Split a segment at the best boundary point (word-aware for non-CJK).
 fn split_segment(seg: &Segment) -> Vec<Segment> {
     let text = &seg.text;
     let char_count = text.chars().count();
@@ -276,40 +276,65 @@ fn split_segment(seg: &Segment) -> Vec<Segment> {
         return vec![seg.clone()];
     }
 
-    // Find best split point (sentence boundary near midpoint)
     let mid = char_count / 2;
+    let chars: Vec<char> = text.chars().collect();
     let mut best_split = mid;
-    let mut best_distance = char_count;
 
     let is_cjk = is_cjk_text(text);
-    let sentence_ends: &[char] = if is_cjk { CJK_SENTENCE_END } else { EN_SENTENCE_END };
 
-    for (i, c) in text.chars().enumerate() {
-        if sentence_ends.contains(&c) {
-            let dist = if i > mid { i - mid } else { mid - i };
-            if dist < best_distance && i > 0 && i < char_count - 1 {
-                best_distance = dist;
-                best_split = i + 1;
+    if is_cjk {
+        // CJK: Find punctuation or cut at midpoint
+        let mut best_distance = char_count;
+        for (i, &c) in chars.iter().enumerate() {
+            if CJK_SENTENCE_END.contains(&c) || c == '，' || c == '、' {
+                let dist = if i > mid { i - mid } else { mid - i };
+                if dist < best_distance && i > 0 && i < char_count - 1 {
+                    best_distance = dist;
+                    best_split = i + 1;
+                }
+            }
+        }
+    } else {
+        // Non-CJK (English, Vietnamese...): Prefer word boundaries (whitespace)
+        let mut found_split = false;
+        let mut best_distance = char_count;
+
+        // Priority 1: Punctuation followed by whitespace
+        for (i, &c) in chars.iter().enumerate() {
+            if (EN_SENTENCE_END.contains(&c) || c == ',' || c == ';')
+                && i + 1 < char_count
+                && chars[i + 1].is_whitespace()
+            {
+                let dist = if i > mid { i - mid } else { mid - i };
+                if dist < best_distance {
+                    best_distance = dist;
+                    best_split = i + 1; // Cut after punctuation
+                    found_split = true;
+                }
+            }
+        }
+
+        // Priority 2: Find whitespace closest to midpoint
+        if !found_split {
+            for offset in 0..=mid {
+                // Scan right
+                if mid + offset < char_count && chars[mid + offset].is_whitespace() {
+                    best_split = mid + offset;
+                    break;
+                }
+                // Scan left
+                if mid >= offset && chars[mid - offset].is_whitespace() {
+                    best_split = mid - offset;
+                    break;
+                }
             }
         }
     }
 
-    // For CJK, split at grapheme cluster boundary
-    if is_cjk {
-        let graphemes: Vec<&str> = text.graphemes(true).collect();
-        let grapheme_mid = graphemes.len() / 2;
-        if best_distance > graphemes.len() / 4 {
-            best_split = graphemes[..grapheme_mid].concat().chars().count();
-        }
-    }
-
-    let (text1, text2): (String, String) = {
-        let chars: Vec<char> = text.chars().collect();
-        (
-            chars[..best_split].iter().collect(),
-            chars[best_split..].iter().collect(),
-        )
-    };
+    let (text1, text2): (String, String) = (
+        chars[..best_split].iter().collect(),
+        chars[best_split..].iter().collect(),
+    );
 
     let ratio = best_split as f32 / char_count as f32;
     let split_time = seg.start + seg.duration() * ratio;
@@ -328,7 +353,7 @@ fn split_segment(seg: &Segment) -> Vec<Segment> {
     ]
 }
 
-/// Format text to respect max lines and line length.
+/// Format text to respect max lines and line length (word-aware for non-CJK).
 fn format_lines(segments: Vec<Segment>) -> Vec<Segment> {
     segments
         .into_iter()
@@ -336,33 +361,49 @@ fn format_lines(segments: Vec<Segment>) -> Vec<Segment> {
             let text = seg.text.trim().to_string();
             let char_count = text.chars().count();
 
-            // If it fits in one line, keep it
+            // Single line case
             if char_count <= MAX_LINE_LEN {
                 seg.text = text;
                 return seg;
             }
 
-            // Split into 2 balanced lines
+            // Multi-line case
             if char_count <= MAX_LINE_LEN * MAX_LINES {
                 let mid = char_count / 2;
                 let chars: Vec<char> = text.chars().collect();
-
-                // Find best split near midpoint (prefer space/punctuation)
                 let mut best = mid;
-                for offset in 0..=mid / 2 {
-                    for try_pos in [mid + offset, mid.saturating_sub(offset)] {
-                        if try_pos < chars.len() {
-                            if chars[try_pos] == ' '
-                                || chars[try_pos] == ','
-                                || CJK_SENTENCE_END.contains(&chars[try_pos])
+                let is_cjk = is_cjk_text(&text);
+
+                if is_cjk {
+                    // CJK: Find punctuation near midpoint
+                    for offset in 0..=mid {
+                        for try_pos in [mid + offset, mid.saturating_sub(offset)] {
+                            if try_pos < chars.len()
+                                && (chars[try_pos] == '，'
+                                    || chars[try_pos] == '、'
+                                    || CJK_SENTENCE_END.contains(&chars[try_pos]))
                             {
                                 best = try_pos + 1;
                                 break;
                             }
                         }
+                        if best != mid {
+                            break;
+                        }
                     }
-                    if best != mid {
-                        break;
+                } else {
+                    // Non-CJK: Find whitespace (word boundary) near midpoint
+                    for offset in 0..=mid {
+                        // Scan right
+                        if mid + offset < chars.len() && chars[mid + offset].is_whitespace() {
+                            best = mid + offset;
+                            break;
+                        }
+                        // Scan left
+                        if mid >= offset && chars[mid - offset].is_whitespace() {
+                            best = mid - offset;
+                            break;
+                        }
                     }
                 }
 
@@ -370,7 +411,6 @@ fn format_lines(segments: Vec<Segment>) -> Vec<Segment> {
                 let line2: String = chars[best..].iter().collect();
                 seg.text = format!("{}\n{}", line1.trim(), line2.trim());
             }
-            // Truncate if somehow > 2 lines worth
             seg
         })
         .collect()

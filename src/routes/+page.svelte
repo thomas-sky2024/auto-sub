@@ -323,12 +323,13 @@
         {:else}
           <div class="url-input-container">
             <label class="field-label" for="url-input">Media URL</label>
-            <input 
+            <input
               id="url-input"
-              type="text" 
-              class="input" 
-              placeholder="https://www.youtube.com/watch?v=..." 
+              type="text"
+              class="input"
+              placeholder="https://www.youtube.com/watch?v=..."
               bind:value={url}
+              onkeypress={(e) => { if (e.key === "Enter" && url.trim() && !$isRunning) startTranscription(); }}
             />
             
             <div class="url-options">
@@ -370,6 +371,7 @@
             <option value="small">Small (~465MB)</option>
             <option value="medium">Medium (~1.5GB)</option>
             <option value="large-v2">Large v2 (Highest Accuracy · ~2.9GB)</option>
+            <option value="large-v3-turbo">Large v3 Turbo (Fast & Stable · ~1.6GB)</option>
           </select>
 
           {#if !modelAvailable}
@@ -399,10 +401,10 @@
           <button
             id="start-btn"
             class="btn btn-primary"
-            disabled={!videoPath || $isRunning}
+            disabled={(sourceType === 'file' && !videoPath) || (sourceType === 'url' && !url.trim()) || $isRunning}
             onclick={startTranscription}
           >
-            {sourceType === "file" 
+            {sourceType === "file"
               ? (videoPath ? "▶ Start Transcription" : "Select a file first")
               : "▶ Download & Transcribe"}
           </button>
