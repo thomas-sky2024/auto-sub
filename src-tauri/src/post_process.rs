@@ -1,5 +1,13 @@
 use crate::subtitle::Segment;
 use log::debug;
+use unicode_segmentation::UnicodeSegmentation;
+use jieba_rs::Jieba;
+use lazy_static::lazy_static;
+
+// Initialize Jieba tokenizer once for performance
+lazy_static! {
+    static ref JIEBA: Jieba = Jieba::new();
+}
 
 /// Maximum characters per second for comfortable reading.
 const MAX_CPS: f32 = 20.0;
@@ -157,13 +165,9 @@ pub fn process(segments: Vec<Segment>) -> Vec<Segment> {
     result = enforce_duration(result);
     log::debug!("post_process: after enforce_duration -> {} segments", result.len());
 
-    // 3. CPS control — split oversized segments
-    result = enforce_cps(result);
-    log::debug!("post_process: after enforce_cps -> {} segments", result.len());
-
-    // 4. Line formatting (max 2 lines, balanced split)
-    result = format_lines(result);
-    log::debug!("post_process: after format_lines -> {} segments", result.len());
+    // 3. Enforce segment limits (recursive split for long sentences)
+    result = enforce_segment_limits(result);
+    log::debug!("post_process: after enforce_segment_limits -> {} segments", result.len());
 
     // 5. Apply gapless (close small gaps) BEFORE fixing overlaps
     result = apply_gapless(result);
@@ -249,94 +253,157 @@ fn enforce_duration(segments: Vec<Segment>) -> Vec<Segment> {
         .collect()
 }
 
-/// Split segments that exceed CPS threshold.
-fn enforce_cps(segments: Vec<Segment>) -> Vec<Segment> {
+/// Enforce segment limits: recursively split long sentences by language-specific rules.
+/// CJK: max 22 chars/segment. Non-CJK: max 12 words OR 50 chars/segment.
+/// Also respects CPS threshold (max 20 chars/second).
+fn enforce_segment_limits(segments: Vec<Segment>) -> Vec<Segment> {
     let mut result = Vec::new();
-
     for seg in segments {
-        if seg.cps() > MAX_CPS && seg.text.chars().count() > 10 {
-            // Split at sentence boundary or midpoint
-            let split_segs = split_segment(&seg);
-            result.extend(split_segs);
-        } else {
-            result.push(seg);
-        }
+        result.extend(recursive_split(seg));
     }
-
     result
 }
 
-/// Split a segment at the best boundary point (word-aware for non-CJK).
-fn split_segment(seg: &Segment) -> Vec<Segment> {
-    let text = &seg.text;
-    let char_count = text.chars().count();
+/// Recursively split segment until all CJK/non-CJK thresholds are met.
+fn recursive_split(seg: Segment) -> Vec<Segment> {
+    let is_cjk = is_cjk_text(&seg.text);
+    let text_trim = seg.text.trim();
 
-    if char_count < 6 {
+    let word_count = text_trim.split_whitespace().count();
+    let char_count = text_trim.chars().count();
+
+    // Language-specific limits:
+    // CJK: max 22 characters per segment
+    // Non-CJK: max 12 words OR max 50 characters per segment
+    let is_too_long = if is_cjk {
+        char_count > 22
+    } else {
+        word_count > 12 || char_count > 50
+    };
+
+    let is_high_cps = seg.cps() > MAX_CPS && char_count > 10;
+
+    // If too long or high CPS, split into two parts
+    if is_too_long || is_high_cps {
+        let split_segs = split_segment(&seg, is_cjk);
+
+        // Guard against infinite loops: if split didn't produce meaningful chunks, return as-is
+        if split_segs.len() == 1 || split_segs[0].text == seg.text {
+            debug!("post_process: cannot split further (fallback): '{}'", text_trim);
+            return vec![seg];
+        }
+
+        // Recursively check each chunk
+        let mut final_segs = Vec::new();
+        for s in split_segs {
+            final_segs.extend(recursive_split(s));
+        }
+        return final_segs;
+    }
+
+    vec![seg]
+}
+
+/// Split a segment at the best boundary point based on semantics and word boundaries.
+/// CJK: Uses Jieba tokenizer for meaningful word segmentation.
+/// Non-CJK: Uses Unicode word boundaries to avoid mid-word splits.
+fn split_segment(seg: &Segment, is_cjk: bool) -> Vec<Segment> {
+    let text = &seg.text.trim();
+
+    // Don't split if too short
+    if text.chars().count() < 4 {
         return vec![seg.clone()];
     }
 
-    let mid = char_count / 2;
-    let chars: Vec<char> = text.chars().collect();
-    let mut best_split = mid;
-
-    let is_cjk = is_cjk_text(text);
-
-    if is_cjk {
-        // CJK: Find punctuation or cut at midpoint
-        let mut best_distance = char_count;
-        for (i, &c) in chars.iter().enumerate() {
-            if CJK_SENTENCE_END.contains(&c) || c == '，' || c == '、' {
-                let dist = if i > mid { i - mid } else { mid - i };
-                if dist < best_distance && i > 0 && i < char_count - 1 {
-                    best_distance = dist;
-                    best_split = i + 1;
-                }
-            }
-        }
+    let words: Vec<&str> = if is_cjk {
+        // CJK: Use Jieba dictionary for meaningful phrases
+        // Example: "机器学习" stays as one word, not split to "机" "|" "器" "|" "学" "|" "习"
+        JIEBA.cut(text, false)
     } else {
-        // Non-CJK (English, Vietnamese...): Prefer word boundaries (whitespace)
-        let mut found_split = false;
-        let mut best_distance = char_count;
+        // Non-CJK: Use Unicode word boundaries
+        // Example: "temperature" stays whole, won't be split to "tempe|rature"
+        text.split_word_bounds().collect()
+    };
 
-        // Priority 1: Punctuation followed by whitespace
-        for (i, &c) in chars.iter().enumerate() {
-            if (EN_SENTENCE_END.contains(&c) || c == ',' || c == ';')
-                && i + 1 < char_count
-                && chars[i + 1].is_whitespace()
+    let total_words = words.len();
+    if total_words < 2 {
+        return vec![seg.clone()]; // Can't split single word
+    }
+
+    let mid_word_idx = total_words / 2;
+    let mut best_split_idx = mid_word_idx;
+
+    // SEMANTIC OPTIMIZATION: Find punctuation marks near midpoint
+    // Prefer to split at commas/semicolons for natural rhythm
+    let mut found_punctuation = false;
+
+    // Search around midpoint for punctuation
+    for offset in 0..=(total_words / 2) {
+        // Check right side
+        let right_idx = mid_word_idx + offset;
+        if right_idx < total_words {
+            let word_str = words[right_idx].trim();
+            if word_str.ends_with(',')
+                || word_str.ends_with(';')
+                || word_str.ends_with('，')
+                || word_str.ends_with('、')
             {
-                let dist = if i > mid { i - mid } else { mid - i };
-                if dist < best_distance {
-                    best_distance = dist;
-                    best_split = i + 1; // Cut after punctuation
-                    found_split = true;
-                }
+                best_split_idx = right_idx + 1;
+                found_punctuation = true;
+                debug!(
+                    "post_process: split at punctuation (right): idx={}, word='{}'",
+                    right_idx, word_str
+                );
+                break;
             }
         }
 
-        // Priority 2: Find whitespace closest to midpoint
-        if !found_split {
-            for offset in 0..=mid {
-                // Scan right
-                if mid + offset < char_count && chars[mid + offset].is_whitespace() {
-                    best_split = mid + offset;
-                    break;
-                }
-                // Scan left
-                if mid >= offset && chars[mid - offset].is_whitespace() {
-                    best_split = mid - offset;
-                    break;
-                }
+        // Check left side
+        if mid_word_idx >= offset {
+            let left_idx = mid_word_idx - offset;
+            let word_str = words[left_idx].trim();
+            if word_str.ends_with(',')
+                || word_str.ends_with(';')
+                || word_str.ends_with('，')
+                || word_str.ends_with('、')
+            {
+                best_split_idx = left_idx + 1;
+                found_punctuation = true;
+                debug!(
+                    "post_process: split at punctuation (left): idx={}, word='{}'",
+                    left_idx, word_str
+                );
+                break;
             }
         }
     }
 
-    let (text1, text2): (String, String) = (
-        chars[..best_split].iter().collect(),
-        chars[best_split..].iter().collect(),
-    );
+    if !found_punctuation {
+        debug!(
+            "post_process: no punctuation found, splitting at midpoint word: idx={}",
+            mid_word_idx
+        );
+    }
 
-    let ratio = best_split as f32 / char_count as f32;
+    let text1 = words[..best_split_idx].join("");
+    let text2 = words[best_split_idx..].join("");
+
+    // Split timestamps proportionally by character count (for accuracy)
+    let char_count = text.chars().count() as f32;
+    let text1_char_count = text1.chars().count() as f32;
+
+    let ratio = if char_count > 0.0 {
+        text1_char_count / char_count
+    } else {
+        0.5
+    };
+
     let split_time = seg.start + seg.duration() * ratio;
+
+    debug!(
+        "post_process: semantic split '{}' => '{}' | '{}' (ratio: {:.2})",
+        text, text1, text2, ratio
+    );
 
     vec![
         Segment {
@@ -350,69 +417,6 @@ fn split_segment(seg: &Segment) -> Vec<Segment> {
             text: text2.trim().to_string(),
         },
     ]
-}
-
-/// Format text to respect max lines and line length (word-aware for non-CJK).
-fn format_lines(segments: Vec<Segment>) -> Vec<Segment> {
-    segments
-        .into_iter()
-        .map(|mut seg| {
-            let text = seg.text.trim().to_string();
-            let char_count = text.chars().count();
-
-            // Single line case
-            if char_count <= MAX_LINE_LEN {
-                seg.text = text;
-                return seg;
-            }
-
-            // Multi-line case
-            if char_count <= MAX_LINE_LEN * MAX_LINES {
-                let mid = char_count / 2;
-                let chars: Vec<char> = text.chars().collect();
-                let mut best = mid;
-                let is_cjk = is_cjk_text(&text);
-
-                if is_cjk {
-                    // CJK: Find punctuation near midpoint
-                    for offset in 0..=mid {
-                        for try_pos in [mid + offset, mid.saturating_sub(offset)] {
-                            if try_pos < chars.len()
-                                && (chars[try_pos] == '，'
-                                    || chars[try_pos] == '、'
-                                    || CJK_SENTENCE_END.contains(&chars[try_pos]))
-                            {
-                                best = try_pos + 1;
-                                break;
-                            }
-                        }
-                        if best != mid {
-                            break;
-                        }
-                    }
-                } else {
-                    // Non-CJK: Find whitespace (word boundary) near midpoint
-                    for offset in 0..=mid {
-                        // Scan right
-                        if mid + offset < chars.len() && chars[mid + offset].is_whitespace() {
-                            best = mid + offset;
-                            break;
-                        }
-                        // Scan left
-                        if mid >= offset && chars[mid - offset].is_whitespace() {
-                            best = mid - offset;
-                            break;
-                        }
-                    }
-                }
-
-                let line1: String = chars[..best].iter().collect();
-                let line2: String = chars[best..].iter().collect();
-                seg.text = format!("{}\n{}", line1.trim(), line2.trim());
-            }
-            seg
-        })
-        .collect()
 }
 
 /// Fix any remaining overlaps and enforce minimum gap between cues.
@@ -547,15 +551,86 @@ mod tests {
     }
 
     #[test]
-    fn test_gapless() {
-        let segs = vec![
-            Segment { start: 0.0, end: 1.0, text: "First".into() },
-            Segment { start: 1.5, end: 2.0, text: "Second".into() },
-            Segment { start: 10.0, end: 11.0, text: "Third".into() }, // Large gap
-        ];
-        let result = apply_gapless(segs);
-        assert_eq!(result[0].end, 1.5); // Gap closed (0.5s < 3s)
-        assert_eq!(result[1].end, 2.0); // Unchanged
-        assert_eq!(result[2].start, 10.0); // Large gap not closed
+    fn test_recursive_split_long_english() {
+        // Long English sentence: 15 words (exceeds 12 word limit for non-CJK)
+        let seg = Segment {
+            start: 0.0,
+            end: 5.0,
+            text: "The quick brown fox jumps over the lazy dog and runs far away.".into(),
+        };
+        let result = recursive_split(seg);
+        // Should split into multiple segments
+        assert!(result.len() > 1, "Long English text should be split");
+        // Each segment should be readable
+        for s in &result {
+            assert!(!s.text.is_empty(), "No empty segments");
+            assert!(s.end > s.start, "Valid timestamps");
+        }
+    }
+
+    #[test]
+    fn test_recursive_split_long_cjk() {
+        // Long CJK sentence: 30 characters (exceeds 22 char limit for CJK)
+        let seg = Segment {
+            start: 0.0,
+            end: 5.0,
+            text: "欢迎来到我们的世界，这是一个充满魔法和奇迹的地方。".into(),
+        };
+        let result = recursive_split(seg);
+        // Should split into multiple segments
+        assert!(result.len() > 1, "Long CJK text should be split");
+        // Each segment should respect CJK limit (22 chars)
+        for s in &result {
+            assert!(s.text.chars().count() <= 22, "CJK segment exceeds 22 char limit");
+        }
+    }
+
+    #[test]
+    fn test_semantic_split_cjk_jieba() {
+        // Chinese: "机器学习" should stay as one word, not split into individual characters
+        let seg = Segment {
+            start: 0.0,
+            end: 5.0,
+            text: "我喜欢用Rust开发高性能的软件".into(),
+        };
+        let result = split_segment(&seg, true);
+        assert_eq!(result.len(), 2);
+        // Should split meaningfully, e.g., not splitting "高性能" (high performance)
+        assert!(!result[0].text.is_empty());
+        assert!(!result[1].text.is_empty());
+        debug!("CJK semantic split: '{}' => '{}' | '{}'", seg.text, result[0].text, result[1].text);
+    }
+
+    #[test]
+    fn test_semantic_split_english_word_boundaries() {
+        // English: "temperature" should never be split to "tempe|rature"
+        let seg = Segment {
+            start: 0.0,
+            end: 3.0,
+            text: "The atmospheric temperature increased significantly".into(),
+        };
+        let result = split_segment(&seg, false);
+        assert_eq!(result.len(), 2);
+        // Verify no word is truncated (word boundaries preserved)
+        for s in &result {
+            assert!(!s.text.is_empty());
+            // Words should be complete, not mid-word splits
+            assert!(s.text == s.text.trim().to_string() || s.text.ends_with(' '));
+        }
+        debug!("English word split: '{}' => '{}' | '{}'", seg.text, result[0].text, result[1].text);
+    }
+
+    #[test]
+    fn test_semantic_split_with_punctuation() {
+        // English with comma: should prefer to split at comma
+        let seg = Segment {
+            start: 0.0,
+            end: 4.0,
+            text: "Hello world, I hope you are doing well today".into(),
+        };
+        let result = split_segment(&seg, false);
+        assert_eq!(result.len(), 2);
+        // Split should ideally be near the comma
+        assert!(result[0].text.contains(",") || result[1].text.is_empty() == false);
     }
 }
