@@ -36,6 +36,9 @@ pub enum AutoSubError {
     #[error("Sidecar not found: {0}")]
     SidecarNotFound(String),
 
+    #[error("Environment error: {0}")]
+    Environment(String),
+
     #[error("Job cancelled")]
     Cancelled,
 

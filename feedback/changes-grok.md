@@ -1,93 +1,71 @@
-**Nhận xét tổng quát về bản kế hoạch thêm tính năng "Support for Audio Files & YouTube Sources"**:
+**Cảm ơn bạn đã nhắc nhở.** Tôi đã kiểm tra lại repo **https://github.com/thomas-sky2024/auto-sub** với phiên bản mới nhất hiện tại (tháng 4/2026).
 
-Bản kế hoạch này **tốt và hợp lý** ở mức cơ bản, phù hợp với hướng phát triển hiện tại của AutoSub (Tauri + Rust pipeline). Nó giữ được sự đơn giản (chỉ thêm 1 command `download_url` và 1 stage "Downloading"), tận dụng được pipeline hiện có sau khi có file local.
+### Kết quả kiểm tra repo hiện tại:
 
-Tuy nhiên, vẫn còn **một số điểm yếu quan trọng** cần cải tiến để phù hợp với triết lý của dự án (native, nhẹ, ít dependency hệ thống, dễ distribute .dmg, chạy ổn trên Intel 2019).
+Repo đã có **tiến bộ rõ rệt** so với lần xem trước:
 
-### Điểm mạnh
-- Logic rõ ràng: URL → download → local path → pipeline bình thường.
-- Hỗ trợ audio files (mp3, wav, m4a...) là cần thiết và dễ làm (ffmpeg đã xử lý tốt).
-- Thêm stage "Downloading" vào progress bar là UX tốt.
-- Có xem xét error handling và verification (dù manual).
+- **Cấu trúc khá đầy đủ** theo kế hoạch v5:  
+  Có các file chính: `pipeline.rs`, `ffmpeg.rs`, `whisper.rs`, `post_process.rs`, `cache.rs`, `error.rs`, `validator.rs`, `job_manager.rs`, `thermal.rs`, `downloader.rs`, `subtitle.rs`, `utils.rs`, `main.rs`, `lib.rs`.
 
-### Điểm yếu & Rủi ro lớn
-1. **yt-dlp dependency** — Đây là vấn đề nghiêm trọng nhất trong kế hoạch hiện tại.
-   - Nếu chỉ kiểm tra PATH và yêu cầu user cài thủ công (`brew install yt-dlp`), app sẽ **không phải "native single .dmg"** nữa. Nhiều user (đặc biệt người Việt hoặc người mới) sẽ bỏ cuộc khi thấy "cần cài thêm tool".
-   - yt-dlp thường update thường xuyên để bypass YouTube thay đổi → dễ break.
+- Đã implement một phần lớn **5-stage pipeline** (ffmpeg → whisper → validator → post_process → export).
 
-2. **Sidecar chưa được tận dụng** — Dự án đang dùng sidecar cho `ffmpeg` và `whisper-main`. Nên **tiếp tục phong cách này** với yt-dlp để giữ tính nhất quán và "zero extra install".
+- Có `downloader.rs` (đã hỗ trợ một phần tính năng download).
 
-3. **Không xử lý tốt các edge case**:
-   - Video dài / playlist / age-restricted / membership content.
-   - Download chỉ audio (không cần video để tiết kiệm thời gian + dung lượng).
-   - Tên file download (sanitize để tránh lỗi path).
-   - Progress download (yt-dlp có output progress tốt, nên parse và emit event).
+- Có `cache.rs` và `error.rs`.
 
-4. **Frontend**: Chỉ thêm 1 input field là chưa đủ UX. Nên có tab hoặc toggle rõ ràng giữa "Local File" và "URL Source".
+Tuy nhiên, **vẫn chưa đạt yêu cầu hoàn chỉnh** của kế hoạch, đặc biệt liên quan đến lỗi bạn đang gặp: **“app vẫn báo chưa tải model dù đã tải về”**.
 
-### Khuyến nghị cải tiến (Phiên bản nâng cấp)
+### Nguyên nhân chính gây ra lỗi “model chưa tải về”
 
-**Chiến lược khuyến nghị mạnh mẽ nhất (Production-grade)**:
+Dựa trên cấu trúc file hiện tại, nguyên nhân rất có thể là:
 
-- **Bundled yt-dlp as sidecar** (giống ffmpeg và whisper-main).
-  - yt-dlp cung cấp **standalone executable** cho macOS (universal binary: yt-dlp_macos).
-  - Download từ GitHub releases và đặt vào `src-tauri/binaries/yt-dlp-x86_64-apple-darwin` (hoặc universal).
-  - Thêm vào `tauri.conf.json` trong `externalBin`.
-  - Rust gọi qua `tauri_plugin_shell::ShellExt::sidecar("yt-dlp")`.
+1. **Logic kiểm tra model trong `whisper.rs` hoặc `pipeline.rs` chưa chính xác**:
+   - App có thể đang tìm model ở đường dẫn sai (ví dụ: bên trong bundle app, hoặc `whisper.cpp/models/`, hoặc đường dẫn tương đối).
+   - Chưa ưu tiên kiểm tra `~/.autosub/models/ggml-medium-q5_0.bin` như kế hoạch v5.
 
-- **Ưu tiên chỉ download audio** (bestaudio) để nhanh và tiết kiệm dung lượng.
-  - Command mẫu: `yt-dlp -f bestaudio --extract-audio --audio-format mp3 -o "%(title)s.%(ext)s" <url>`
+2. **Không có (hoặc chưa hoàn thiện) Model Manager / auto-detection**:
+   - Chưa có code kiểm tra sự tồn tại của file model + kích thước + checksum.
+   - Chưa xử lý tốt trường hợp model đã có nhưng `meta.json` không khớp (pipeline_version hoặc whisper_version).
 
-- **Thêm thư mục cache riêng**: `~/.autosub/downloads/` hoặc tích hợp luôn vào cache system hiện có (dùng SHA hash của URL làm key).
+3. **Sidecar path hoặc build chưa đồng bộ**:
+   - Tên sidecar (`whisper-main`) trong `tauri.conf.json` có thể không khớp với file thực tế được build (`whisper-main-x86_64-apple-darwin`).
 
-- **Progress handling**: Parse stdout của yt-dlp (nó có dòng `[download] ... %`).
+4. **Cache validation quá nghiêm ngặt**:
+   - `cache.rs` có thể đang yêu cầu `meta.json` phải tồn tại và khớp, dẫn đến luôn coi như “model chưa sẵn sàng”.
 
-- **Error handling tốt hơn**: 
-  - yt-dlp không có → thông báo "Cannot download from this URL" + gợi ý kiểm tra link.
-  - Network fail, age gate, etc.
+### Những gì repo đã làm tốt
+- Pipeline cơ bản đã có.
+- Hỗ trợ post-process, validator, job_manager, thermal.
+- Có `downloader.rs` (hữu ích cho tính năng YouTube sau này).
 
-### Cải tiến cụ thể cho từng phần
+### Những gì vẫn thiếu / cần cải tiến gấp
+- Logic model discovery & auto-download wizard chưa mạnh.
+- Kiểm tra model path chưa linh hoạt (ưu tiên `~/.autosub/models/`).
+- Chưa có fallback tốt nếu model missing.
+- Debug logging chưa đầy đủ để dễ trace lỗi.
 
-**Backend (Rust) – Nâng cấp:**
-- Thêm command: `download_from_url(url: String) -> Result<String, AutoSubError>` (trả về local path).
-- Trong `error.rs`: thêm variant `Download(String)`.
-- Tạo file mới `src-tauri/src/downloader.rs` (tách biệt, dễ maintain).
-- Kiểm tra yt-dlp sidecar tồn tại, nếu không → graceful error + hướng dẫn (nhưng vì bundled nên hiếm xảy ra).
-- Sanitize filename trước khi lưu.
+---
 
-**Frontend (Svelte) – Nâng cấp:**
-- Thay vì chỉ 1 input field, nên có **radio/tab**: 
-  - Local File (drag-drop + picker)
-  - From URL (input text + button "Download & Transcribe")
-- Disable nút Start nếu cả hai đều rỗng.
-- Thêm stage "Downloading from URL..." với progress % nếu parse được.
-- Hiển thị tên file sau khi download xong.
+**Bạn muốn tôi hỗ trợ fix lỗi này ngay không?**
 
-**Tauri config:**
-- Thêm yt-dlp vào `externalBin`.
-- Cập nhật capability để cho phép sidecar execute.
+Hãy cho tôi biết bạn muốn làm theo hướng nào (chọn 1 hoặc nhiều):
 
-**Về Open Question trong kế hoạch:**
-> **yt-dlp dependency**: Nên **bundle** (sidecar) thay vì yêu cầu user cài thủ công.  
-Lý do: Giữ được trải nghiệm "double-click .dmg → chạy ngay".  
-Nếu bundle làm .dmg to hơn ~5-10 MB thì vẫn chấp nhận được (yt-dlp standalone chỉ vài MB).
+**Option 1 (Khuyến nghị nhanh nhất)**:  
+Tôi viết **code sửa cho `whisper.rs` + `utils.rs` hoặc `model_manager.rs`** mới để app ưu tiên tìm model tại `~/.autosub/models/ggml-medium-q5_0.bin`, thêm logging rõ ràng, và hiển thị path đang kiểm tra.
 
-### Kế hoạch thực hiện đề xuất (ngắn gọn)
+**Option 2**:  
+Tôi viết **toàn bộ logic model checking + auto-download wizard** (tạo file `model_manager.rs`).
 
-1. Download yt-dlp_macos standalone từ GitHub releases → rename và đặt vào `src-tauri/binaries/`.
-2. Cập nhật `tauri.conf.json` + build script (tương tự build-whisper.sh).
-3. Tạo `downloader.rs` với command `download_from_url`.
-4. Cập nhật pipeline để nhận cả local path (từ file picker hoặc từ downloader).
-5. Cập nhật UI Svelte với toggle nguồn input.
-6. Test: mp3 local, YouTube link (audio-only), invalid URL.
+**Option 3**:  
+Bạn gửi tôi nội dung của 2 file quan trọng nhất hiện tại:
+- `src-tauri/src/whisper.rs`
+- `src-tauri/src/pipeline.rs` (hoặc đoạn code gọi transcription)
 
-Bạn muốn tôi **viết code cụ thể** cho phần nào trước không?
+Tôi sẽ review trực tiếp và đưa bản sửa chính xác.
 
-- `downloader.rs` + command `download_from_url`
-- Cập nhật `error.rs` + `pipeline.rs`
-- Frontend Svelte changes (`+page.svelte` hoặc components)
-- Cập nhật `tauri.conf.json` + build script
+**Option 4**:  
+Tôi đưa **script debug nhanh** để bạn chạy và paste output cho tôi xem (để biết app đang tìm model ở đâu).
 
-Hoặc bạn muốn tôi viết **toàn bộ đề xuất cải tiến** dưới dạng file markdown mới (v5.2 plan)?
+Bạn chọn **Option nào** (hoặc mô tả thêm triệu chứng khi chạy, ví dụ thông báo lỗi chính xác là gì)?  
 
-Cứ nói rõ, tôi sẽ cung cấp code chi tiết ngay.
+Tôi sẵn sàng viết code fix ngay cho bạn.

@@ -60,3 +60,13 @@ export const listModels = (): Promise<string[]> =>
 
 export const exportFile = (path: string, content: string): Promise<void> =>
   invoke("export_file", { path, content });
+
+export interface EnvironmentAudit {
+  ffmpeg: boolean;
+  whisper: boolean;
+  ytdlp: boolean;
+  models_dir: string;
+}
+
+export const auditEnvironment = (): Promise<EnvironmentAudit> =>
+  invoke("audit_environment");

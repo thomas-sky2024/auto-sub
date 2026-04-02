@@ -7,7 +7,7 @@
     jobStore, isRunning, isIdle, hasResult, activeTab,
     selectedLanguage, selectedModel, performanceMode,
   } from "$lib/jobStore";
-  import { startPipeline, cancelJob, checkModel, exportFile, downloadMedia } from "$lib/invoke";
+  import { startPipeline, cancelJob, checkModel, exportFile, downloadMedia, auditEnvironment, type EnvironmentAudit } from "$lib/invoke";
 
   // ── State ────────────────────────────────────────────────────────────────────
   let videoPath = $state<string | null>(null);
@@ -24,8 +24,13 @@
   let unlisten: (() => void) | null = null;
   let unlistenDownload: (() => void) | null = null;
 
+  // Environment Audit State
+  let auditResult = $state<EnvironmentAudit | null>(null);
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────────
   onMount(async () => {
+    await performAudit();
+    
     // Listen for pipeline progress events from Rust
     unlisten = await listen<{ stage: string; percent: number; segment_count: number }>(
       "pipeline-progress",
@@ -42,6 +47,14 @@
       }
     );
   });
+
+  async function performAudit() {
+    try {
+      auditResult = await auditEnvironment();
+    } catch (e) {
+      console.error("Audit failed:", e);
+    }
+  }
 
   onDestroy(() => {
     unlisten?.();
@@ -173,6 +186,59 @@
 
 <!-- ── App Shell ─────────────────────────────────────────────────────────────── -->
 <div class="app">
+  <!-- Environment Requirements Alert -->
+  {#if auditResult && (!auditResult.ffmpeg || !auditResult.whisper || !auditResult.ytdlp)}
+    <div class="fixed-overlay">
+      <div class="audit-modal">
+        <div class="audit-header">
+          <div class="audit-icon-bg">
+            <svg class="audit-svg" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          </div>
+          <h2 class="audit-title">System Requirements</h2>
+        </div>
+
+        <p class="audit-desc">
+          AutoSub requires some external tools to be installed in your system PATH or application directory.
+        </p>
+
+        <ul class="audit-list">
+          <li class="audit-item {auditResult.ffmpeg ? 'success' : 'error'}">
+            <span class="audit-item-label">FFmpeg</span>
+            <span class="audit-status">
+              {auditResult.ffmpeg ? '✓ Found' : '✗ Missing'}
+            </span>
+          </li>
+          <li class="audit-item {auditResult.whisper ? 'success' : 'error'}">
+            <span class="audit-item-label">Whisper-Main</span>
+            <span class="audit-status">
+              {auditResult.whisper ? '✓ Found' : '✗ Missing'}
+            </span>
+          </li>
+          <li class="audit-item {auditResult.ytdlp ? 'success' : 'error'}">
+            <span class="audit-item-label">YT-DLP</span>
+            <span class="audit-status">
+              {auditResult.ytdlp ? '✓ Found' : '✗ Missing'}
+            </span>
+          </li>
+        </ul>
+
+        <div class="audit-path-box">
+          <p class="audit-path-label">Models directory:</p>
+          <p class="audit-path-val">{auditResult.models_dir}</p>
+        </div>
+
+        <button 
+          onclick={performAudit}
+          class="audit-btn"
+        >
+          Retry Check
+        </button>
+      </div>
+    </div>
+  {/if}
+
   <!-- Header -->
   <header class="header">
     <div class="header-inner">
@@ -1001,5 +1067,118 @@
     color: #6b7194;
     line-height: 1.5;
     white-space: pre;
+  }
+  
+  /* ── Audit Modal ─────────────────────────────────────────────────────────── */
+  .fixed-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    padding: 1rem;
+  }
+  .audit-modal {
+    background: #13141c;
+    border: 1px solid #3d1515;
+    border-radius: 20px;
+    padding: 2rem;
+    max-w: 420px;
+    width: 100%;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  }
+  .audit-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .audit-icon-bg {
+    padding: 0.75rem;
+    background: rgba(239, 68, 68, 0.1);
+    border-radius: 12px;
+  }
+  .audit-svg {
+    width: 2rem;
+    height: 2rem;
+    color: #ef4444;
+  }
+  .audit-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #ef4444;
+  }
+  .audit-desc {
+    color: #9ca3af;
+    margin-bottom: 1.5rem;
+    font-style: italic;
+    font-size: 0.9rem;
+  }
+  .audit-list {
+    list-style: none;
+    margin-bottom: 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .audit-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    font-size: 0.95rem;
+  }
+  .audit-item.success {
+    background: rgba(16, 185, 129, 0.05);
+    border-color: rgba(16, 185, 129, 0.2);
+  }
+  .audit-item.error {
+    background: rgba(239, 68, 68, 0.05);
+    border-color: rgba(239, 68, 68, 0.2);
+  }
+  .audit-item-label {
+    font-weight: 600;
+  }
+  .audit-status {
+    font-weight: 700;
+  }
+  .audit-item.success .audit-status { color: #10b981; }
+  .audit-item.error .audit-status { color: #ef4444; }
+
+  .audit-path-box {
+    background: rgba(31, 41, 55, 0.5);
+    padding: 1rem;
+    border-radius: 12px;
+    margin-bottom: 2rem;
+    font-family: monospace;
+    font-size: 0.7rem;
+  }
+  .audit-path-label {
+    color: #6b7280;
+    margin-bottom: 0.25rem;
+  }
+  .audit-path-val {
+    color: #d1d5db;
+    word-break: break-all;
+  }
+  .audit-btn {
+    width: 100%;
+    padding: 1rem;
+    background: linear-gradient(135deg, #2563eb, #4f46e5);
+    color: white;
+    border-radius: 12px;
+    font-weight: 700;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .audit-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 15px -3px rgba(37, 99, 235, 0.4);
   }
 </style>

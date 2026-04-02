@@ -111,6 +111,13 @@ async fn run_whisper(
         args.extend(["-l".to_string(), language.to_string()]);
     }
 
+    if !Path::new(whisper_bin).exists() {
+        return Err(AutoSubError::SidecarNotFound(format!(
+            "whisper-main not found at {}. Please check your installation.",
+            whisper_bin
+        )));
+    }
+
     let mut child = Command::new(whisper_bin)
         .args(&args)
         .stdout(Stdio::piped())

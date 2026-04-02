@@ -35,6 +35,13 @@ async fn run_ffmpeg(
 ) -> Result<()> {
     info!("ffmpeg: extracting audio from {}", video_path);
 
+    if !Path::new(ffmpeg_bin).exists() {
+        return Err(AutoSubError::SidecarNotFound(format!(
+            "ffmpeg not found at {}. Please check your installation.",
+            ffmpeg_bin
+        )));
+    }
+
     if !Path::new(video_path).exists() {
         return Err(AutoSubError::AudioExtract(format!(
             "Input file not found: {}",
@@ -136,6 +143,13 @@ pub async fn get_video_duration(ffmpeg_bin: &str, video_path: &str) -> Result<f3
     } else {
         "ffprobe".to_string() // fallback to system ffprobe
     };
+
+    if !Path::new(&ffprobe_path).exists() && ffprobe_path != "ffprobe" {
+         return Err(AutoSubError::SidecarNotFound(format!(
+            "ffprobe not found at {}. Please check your installation.",
+            ffprobe_path
+        )));
+    }
 
     let output = Command::new(&ffprobe_path)
         .args([

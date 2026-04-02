@@ -4,6 +4,7 @@ mod error;
 mod ffmpeg;
 mod job_manager;
 mod pipeline;
+mod model_manager;
 mod post_process;
 mod subtitle;
 mod thermal;
@@ -52,38 +53,39 @@ async fn get_job_state(
     Ok(state.job_manager.state())
 }
 
-/// Check if a model file exists.
+/// Check if a model file exists and is valid.
 #[tauri::command]
 async fn check_model(model_name: String) -> Result<bool, error::AutoSubError> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let model_path = home
-        .join(".autosub")
-        .join("models")
-        .join(format!("ggml-{}.bin", model_name));
-    Ok(model_path.exists())
+    Ok(model_manager::ModelManager::verify_model(&model_name))
 }
 
-/// List available models.
+/// List available verified models.
 #[tauri::command]
 async fn list_models() -> Result<Vec<String>, error::AutoSubError> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let models_dir = home.join(".autosub").join("models");
-    let mut models = Vec::new();
+    Ok(model_manager::ModelManager::list_models())
+}
 
-    if let Ok(entries) = std::fs::read_dir(models_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("ggml-") && name.ends_with(".bin") {
-                let model_name = name
-                    .trim_start_matches("ggml-")
-                    .trim_end_matches(".bin")
-                    .to_string();
-                models.push(model_name);
-            }
-        }
-    }
+#[derive(serde::Serialize)]
+pub struct EnvironmentAudit {
+    pub ffmpeg: bool,
+    pub whisper: bool,
+    pub ytdlp: bool,
+    pub models_dir: String,
+}
 
-    Ok(models)
+/// Audit the system environment for required dependencies.
+#[tauri::command]
+async fn audit_environment() -> Result<EnvironmentAudit, error::AutoSubError> {
+    let ffmpeg_path = utils::resolve_bin("ffmpeg");
+    let whisper_path = utils::resolve_bin("whisper-main");
+    let ytdlp_path = utils::resolve_bin("yt-dlp");
+
+    Ok(EnvironmentAudit {
+        ffmpeg: std::path::Path::new(&ffmpeg_path).exists(),
+        whisper: std::path::Path::new(&whisper_path).exists(),
+        ytdlp: std::path::Path::new(&ytdlp_path).exists(),
+        models_dir: model_manager::ModelManager::get_models_dir(),
+    })
 }
 
 /// Export SRT content to a file.
@@ -118,6 +120,7 @@ pub fn run() {
             get_job_state,
             check_model,
             list_models,
+            audit_environment,
             export_file,
             downloader::download_media,
         ])

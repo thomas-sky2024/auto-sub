@@ -1,10 +1,10 @@
 use crate::{
     cache, error::{AutoSubError, Result},
-    ffmpeg, job_manager::JobManager, post_process, subtitle, thermal, validator, whisper,
+    ffmpeg, job_manager::JobManager, model_manager::ModelManager, post_process, subtitle, 
+    thermal, utils, validator, whisper,
 };
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
@@ -68,7 +68,7 @@ pub async fn run(
         emit_progress(&app, "Done (from cache)", 100.0, 0);
         let segments = parse_srt_to_segments(&srt_content);
         let txt = subtitle::to_txt(&segments);
-        let dur = ffmpeg::get_video_duration(&resolve_bin("ffmpeg"), video_path)
+        let dur = ffmpeg::get_video_duration(&utils::resolve_bin("ffmpeg"), video_path)
             .await
             .unwrap_or(0.0);
         return Ok(PipelineResult {
@@ -80,9 +80,12 @@ pub async fn run(
         });
     }
 
-    let ffmpeg_bin = resolve_bin("ffmpeg");
-    let whisper_bin = resolve_bin("whisper-main");
-    let model_path = resolve_model(model_name);
+    let ffmpeg_bin = utils::resolve_bin("ffmpeg");
+    let whisper_bin = utils::resolve_bin("whisper-main");
+    let model_path = ModelManager::get_model_path(model_name).to_string_lossy().to_string();
+
+    info!("pipeline: using binaries ffmpeg={}, whisper={}", ffmpeg_bin, whisper_bin);
+    info!("pipeline: using model at {}", model_path);
 
     // Get video duration for progress calculation
     let duration_secs = ffmpeg::get_video_duration(&ffmpeg_bin, video_path)
@@ -214,31 +217,6 @@ pub async fn run(
         duration_secs,
         from_cache: false,
     })
-}
-
-/// Resolve a bundled binary path.
-fn resolve_bin(name: &str) -> String {
-    // Try to find in same directory as this executable
-    if let Ok(mut exe) = std::env::current_exe() {
-        exe.pop(); // remove executable name
-        let bin = exe.join(name);
-        if bin.exists() {
-            return bin.to_string_lossy().to_string();
-        }
-    }
-    // Fall back to system PATH
-    name.to_string()
-}
-
-/// Resolve model path from model name.
-fn resolve_model(model_name: &str) -> String {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let model_file = format!("ggml-{}.bin", model_name);
-    home.join(".autosub")
-        .join("models")
-        .join(&model_file)
-        .to_string_lossy()
-        .to_string()
 }
 
 /// Minimal SRT parser for cache-hit path (parse back to segments).
