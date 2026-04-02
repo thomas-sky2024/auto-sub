@@ -1,6 +1,5 @@
 use crate::subtitle::Segment;
 use log::debug;
-use unicode_segmentation::UnicodeSegmentation;
 
 /// Maximum characters per second for comfortable reading.
 const MAX_CPS: f32 = 20.0;
