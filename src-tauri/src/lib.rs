@@ -16,6 +16,7 @@ use job_manager::JobManager;
 use pipeline::{PipelineOptions, PipelineResult};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+use tauri_plugin_shell::ShellExt;
 
 /// Shared app state — thread-safe job manager.
 pub struct AppState {
@@ -75,15 +76,15 @@ pub struct EnvironmentAudit {
 
 /// Audit the system environment for required dependencies.
 #[tauri::command]
-async fn audit_environment() -> Result<EnvironmentAudit, error::AutoSubError> {
-    let ffmpeg_path = utils::resolve_bin("ffmpeg");
-    let whisper_path = utils::resolve_bin("whisper-main");
-    let ytdlp_path = utils::resolve_bin("yt-dlp");
+async fn audit_environment(app: AppHandle) -> Result<EnvironmentAudit, error::AutoSubError> {
+    let ffmpeg_ok = app.shell().sidecar("ffmpeg").is_ok();
+    let whisper_ok = app.shell().sidecar("whisper-main").is_ok();
+    let ytdlp_ok = app.shell().sidecar("yt-dlp").is_ok();
 
     Ok(EnvironmentAudit {
-        ffmpeg: std::path::Path::new(&ffmpeg_path).exists(),
-        whisper: std::path::Path::new(&whisper_path).exists(),
-        ytdlp: std::path::Path::new(&ytdlp_path).exists(),
+        ffmpeg: ffmpeg_ok,
+        whisper: whisper_ok,
+        ytdlp: ytdlp_ok,
         models_dir: model_manager::ModelManager::get_models_dir(),
     })
 }

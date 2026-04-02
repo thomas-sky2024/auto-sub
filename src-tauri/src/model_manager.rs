@@ -6,17 +6,60 @@ pub struct ModelManager;
 
 impl ModelManager {
     /// Returns the absolute path to a model file.
+    /// Handles common naming variations for whisper models.
     pub fn get_model_path(model_name: &str) -> PathBuf {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".autosub")
-            .join("models")
-            .join(format!("ggml-{}.bin", model_name))
+        let models_dir = home.join(".autosub").join("models");
+        
+        // Normalize model name for filename
+        let normalized = model_name.to_lowercase().replace(" ", "-");
+        
+        // Try exact match first
+        let exact_path = models_dir.join(format!("ggml-{}.bin", normalized));
+        if exact_path.exists() {
+            return exact_path;
+        }
+
+        // Try with common suffixes if exact match fails
+        let common_variants = vec![
+            format!("ggml-{}.bin", normalized),
+            format!("ggml-model-{}.bin", normalized),
+            format!("{}.bin", normalized),
+        ];
+
+        for variant in common_variants {
+            let p = models_dir.join(variant);
+            if p.exists() {
+                return p;
+            }
+        }
+
+        // Default path if none exist yet
+        exact_path
     }
 
     /// Verifies if a model exists and has a minimum size.
     pub fn verify_model(model_name: &str) -> bool {
         let path = Self::get_model_path(model_name);
         if !path.exists() {
+            // Also check for directory contents for matching patterns
+            // specifically for "large-v3" which might be named "largev3"
+            let home = dirs::home_dir().unwrap_or_default();
+            let models_dir = home.join(".autosub").join("models");
+            if let Ok(entries) = fs::read_dir(&models_dir) {
+                let pattern = model_name.to_lowercase().replace("-", "").replace(" ", "");
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string().to_lowercase();
+                    if name.contains(&pattern) && name.ends_with(".bin") {
+                        // Found a likely match
+                        if let Ok(meta) = fs::metadata(entry.path()) {
+                            if meta.len() > 10 * 1024 * 1024 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
             return false;
         }
 

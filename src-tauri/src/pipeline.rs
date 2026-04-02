@@ -1,8 +1,9 @@
 use crate::{
     cache, error::{AutoSubError, Result},
     ffmpeg, job_manager::JobManager, model_manager::ModelManager, post_process, subtitle, 
-    thermal, utils, validator, whisper,
+    thermal, validator, whisper,
 };
+use tauri_plugin_shell::ShellExt;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -68,9 +69,12 @@ pub async fn run(
         emit_progress(&app, "Done (from cache)", 100.0, 0);
         let segments = parse_srt_to_segments(&srt_content);
         let txt = subtitle::to_txt(&segments);
-        let dur = ffmpeg::get_video_duration(&utils::resolve_bin("ffmpeg"), video_path)
-            .await
-            .unwrap_or(0.0);
+        let ffmpeg_sidecar = app.shell().sidecar("ffmpeg").ok();
+        let dur = if let Some(sidecar) = ffmpeg_sidecar {
+            ffmpeg::get_video_duration(sidecar, video_path).await.unwrap_or(0.0)
+        } else {
+            0.0
+        };
         return Ok(PipelineResult {
             segments,
             srt_content,
@@ -80,8 +84,8 @@ pub async fn run(
         });
     }
 
-    let ffmpeg_bin = utils::resolve_bin("ffmpeg");
-    let whisper_bin = utils::resolve_bin("whisper-main");
+    // Try to get ffprobe sidecar if it exists, otherwise fall back to ffmpeg search
+    let ffprobe_sidecar = app.shell().sidecar("ffprobe").ok();
 
     // Validate model exists before proceeding
     if !ModelManager::verify_model(model_name) {
@@ -94,13 +98,18 @@ pub async fn run(
 
     let model_path = ModelManager::get_model_path(model_name).to_string_lossy().to_string();
 
-    info!("pipeline: using binaries ffmpeg={}, whisper={}", ffmpeg_bin, whisper_bin);
+    info!("pipeline: sidecars resolved successfully");
     info!("pipeline: using model at {}", model_path);
 
     // Get video duration for progress calculation
-    let duration_secs = ffmpeg::get_video_duration(&ffmpeg_bin, video_path)
-        .await
-        .unwrap_or(0.0);
+    // If ffprobe sidecar is missing, we try to use the ffmpeg sidecar path as a base
+    let duration_secs = if let Some(ffp) = ffprobe_sidecar {
+        ffmpeg::get_video_duration(ffp, video_path).await.unwrap_or(0.0)
+    } else {
+        // Fallback or just return 0.0 for now
+        warn!("ffprobe sidecar not found, duration might be inaccurate");
+        0.0
+    };
 
     // ── Stage 1: Audio extraction ─────────────────────────────────────────────
     emit_progress(&app, "Extracting audio", 5.0, 0);
@@ -116,7 +125,7 @@ pub async fn run(
 
 
     // Run ffmpeg with retry
-    crate::utils::retry(|| {
+    crate::utils::retry(|| async {
         let (tx, mut rx) = mpsc::channel::<ffmpeg::FfmpegProgress>(32);
         let app_clone = app.clone();
         let jm_clone = job_mgr.clone();
@@ -127,13 +136,18 @@ pub async fn run(
                 jm_clone.update_progress("Extracting audio", scaled);
             }
         });
+
+        let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| 
+            AutoSubError::SidecarNotFound(format!("ffmpeg sidecar not found: {}", e))
+        )?;
+
         ffmpeg::extract_audio(
-            &ffmpeg_bin,
+            sidecar,
             video_path,
             &audio_path,
             duration_secs,
             Some(tx),
-        )
+        ).await
     }, 2).await?;
 
     cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Extracted)?;
@@ -147,7 +161,7 @@ pub async fn run(
     let output_dir = cache_dir.to_string_lossy().to_string();
 
     // Run whisper with retry and fallback
-    let raw_segments = match crate::utils::retry(|| {
+    let raw_segments = match crate::utils::retry(|| async {
         let (tx, mut rx) = mpsc::channel::<whisper::WhisperProgress>(32);
         let app_clone = app.clone();
         let jm_clone = job_mgr.clone();
@@ -158,15 +172,20 @@ pub async fn run(
                 jm_clone.update_progress("Transcribing", scaled);
             }
         });
+
+        let sidecar = app.shell().sidecar("whisper-main").map_err(|e| 
+            AutoSubError::SidecarNotFound(format!("whisper-main sidecar not found: {}", e))
+        )?;
+
         whisper::transcribe(
-            &whisper_bin,
+            sidecar,
             &model_path,
             &audio_path,
             &output_dir,
             lang,
             threads,
             Some(tx),
-        )
+        ).await
     }, 2).await {
         Ok(s) => s,
         Err(e) => {
@@ -175,8 +194,12 @@ pub async fn run(
             // Use ModelManager to construct fallback path properly
             if ModelManager::verify_model("small") {
                 let small_model_path = ModelManager::get_model_path("small").to_string_lossy().to_string();
+                let sidecar = app.shell().sidecar("whisper-main").map_err(|e| 
+                    AutoSubError::SidecarNotFound(format!("whisper-main sidecar not found: {}", e))
+                )?;
+
                 whisper::transcribe(
-                    &whisper_bin,
+                    sidecar,
                     &small_model_path,
                     &audio_path,
                     &output_dir,

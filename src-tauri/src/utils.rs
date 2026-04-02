@@ -60,16 +60,3 @@ pub fn log_debug(msg: &str) {
     }
 }
 
-/// Resolve a bundled binary path.
-pub fn resolve_bin(name: &str) -> String {
-    // Try to find in same directory as this executable
-    if let Ok(mut exe) = std::env::current_exe() {
-        exe.pop(); // remove executable name
-        let bin = exe.join(name);
-        if bin.exists() {
-            return bin.to_string_lossy().to_string();
-        }
-    }
-    // Fall back to system PATH
-    name.to_string()
-}

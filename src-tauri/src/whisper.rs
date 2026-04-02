@@ -3,11 +3,8 @@ use crate::subtitle::Segment;
 use log::info;
 use serde::Deserialize;
 use std::path::Path;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tauri_plugin_shell::process::{Command, CommandEvent};
 use tokio::sync::mpsc;
-use tokio::time::{timeout, Duration};
 
 /// Progress update from whisper.
 #[derive(Debug, Clone)]
@@ -48,7 +45,7 @@ fn parse_timestamp(ts: &str) -> f32 {
 /// Run whisper-main CLI on an audio file.
 /// Retries once on failure, then falls back to `small` model.
 pub async fn transcribe(
-    whisper_bin: &str,
+    sidecar: Command,
     model_path: &str,
     audio_path: &str,
     output_dir: &str,
@@ -82,7 +79,7 @@ pub async fn transcribe(
     }
 
     run_whisper(
-        whisper_bin,
+        sidecar,
         model_path,
         audio_path,
         output_dir,
@@ -94,7 +91,7 @@ pub async fn transcribe(
 }
 
 async fn run_whisper(
-    whisper_bin: &str,
+    sidecar: Command,
     model_path: &str,
     audio_path: &str,
     output_dir: &str,
@@ -136,78 +133,56 @@ async fn run_whisper(
         args.extend(["-l".to_string(), language.to_string()]);
     }
 
-    if !Path::new(whisper_bin).exists() {
-        return Err(AutoSubError::SidecarNotFound(format!(
-            "whisper-main not found at {}. Please check your installation.",
-            whisper_bin
-        )));
-    }
-
-    let mut child = Command::new(whisper_bin)
+    let (mut rx, mut _child) = sidecar
         .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| AutoSubError::WhisperDecode(format!("Failed to spawn whisper: {}", e)))?;
+        .map_err(|e| AutoSubError::WhisperDecode(format!("Failed to spawn whisper sidecar: {}", e)))?;
 
-    let (stderr_tx, mut stderr_rx) = mpsc::channel::<String>(256);
+    let mut stderr_output = Vec::new();
 
-    // Parse stdout/stderr for progress
-    if let Some(stdout) = child.stdout.take() {
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
-        let progress_tx = progress_tx.clone();
-
-        tokio::spawn(async move {
-            while let Ok(Some(line)) = lines.next_line().await {
-                // whisper --print-progress outputs "progress = XX%"
-                if line.contains("progress =") {
-                    if let Some(pct_str) = line.split('=').nth(1) {
-                        if let Ok(pct) = pct_str.trim().trim_end_matches('%').parse::<f32>() {
-                            if let Some(ref tx) = progress_tx {
-                                let _ = tx.send(WhisperProgress { percent: pct }).await;
+    loop {
+        match rx.recv().await {
+            Some(event) => {
+                match event {
+                    CommandEvent::Stdout(line) => {
+                        let line_str = String::from_utf8_lossy(&line);
+                        // whisper --print-progress outputs "progress = XX%"
+                        if line_str.contains("progress =") {
+                            if let Some(pct_str) = line_str.split('=').nth(1) {
+                                if let Ok(pct) = pct_str.trim().trim_end_matches('%').parse::<f32>() {
+                                    if let Some(ref tx) = progress_tx {
+                                        let _ = tx.send(WhisperProgress { percent: pct }).await;
+                                    }
+                                }
                             }
                         }
                     }
+                    CommandEvent::Stderr(line) => {
+                        let line_str = String::from_utf8_lossy(&line);
+                        stderr_output.push(line_str.to_string());
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        if payload.code == Some(0) {
+                            info!("whisper: process terminated successfully");
+                            break;
+                        } else {
+                            let stderr_msg = if !stderr_output.is_empty() {
+                                format!("\nwhisper stderr: {}", stderr_output.join("\n"))
+                            } else {
+                                String::new()
+                            };
+                            return Err(AutoSubError::WhisperDecode(format!(
+                                "whisper exited with code: {:?}{}",
+                                payload.code,
+                                stderr_msg
+                            )));
+                        }
+                    }
+                    _ => {}
                 }
             }
-        });
-    }
-
-    // Capture stderr for error reporting
-    if let Some(stderr) = child.stderr.take() {
-        let stderr_tx = stderr_tx.clone();
-        tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let _ = stderr_tx.send(line).await;
-            }
-        });
-    }
-
-    let status = child.wait().await.map_err(|e| {
-        AutoSubError::WhisperDecode(format!("whisper process error: {}", e))
-    })?;
-
-    // Collect any stderr output that was captured
-    let mut stderr_output = Vec::new();
-    while let Ok(Some(line)) = timeout(Duration::from_millis(100), stderr_rx.recv()).await {
-        stderr_output.push(line);
-    }
-
-    if !status.success() {
-        let stderr_msg = if !stderr_output.is_empty() {
-            format!("\nwhisper stderr: {}", stderr_output.join("\n"))
-        } else {
-            String::new()
-        };
-
-        return Err(AutoSubError::WhisperDecode(format!(
-            "whisper exited with code: {:?}{}",
-            status.code(),
-            stderr_msg
-        )));
+            None => break,
+        }
     }
 
     // Parse output JSON
