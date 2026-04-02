@@ -82,6 +82,16 @@ pub async fn run(
 
     let ffmpeg_bin = utils::resolve_bin("ffmpeg");
     let whisper_bin = utils::resolve_bin("whisper-main");
+
+    // Validate model exists before proceeding
+    if !ModelManager::verify_model(model_name) {
+        return Err(AutoSubError::WhisperDecode(format!(
+            "Model '{}' not found or invalid. Please check that the model is downloaded to {}",
+            model_name,
+            ModelManager::get_models_dir()
+        )));
+    }
+
     let model_path = ModelManager::get_model_path(model_name).to_string_lossy().to_string();
 
     info!("pipeline: using binaries ffmpeg={}, whisper={}", ffmpeg_bin, whisper_bin);
@@ -161,11 +171,13 @@ pub async fn run(
         Ok(s) => s,
         Err(e) => {
             warn!("Primary model failed, attempting fallback to small model: {}", e);
-            let small_model = model_path.replace(model_name, "small");
-            if std::path::Path::new(&small_model).exists() {
+
+            // Use ModelManager to construct fallback path properly
+            if ModelManager::verify_model("small") {
+                let small_model_path = ModelManager::get_model_path("small").to_string_lossy().to_string();
                 whisper::transcribe(
                     &whisper_bin,
-                    &small_model,
+                    &small_model_path,
                     &audio_path,
                     &output_dir,
                     lang,
@@ -173,7 +185,10 @@ pub async fn run(
                     None,
                 ).await?
             } else {
-                return Err(e);
+                return Err(AutoSubError::WhisperDecode(format!(
+                    "Primary model '{}' failed and fallback model 'small' not available. {}",
+                    model_name, e
+                )));
             }
         }
     };
