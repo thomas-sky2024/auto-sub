@@ -91,6 +91,6 @@ export const segmentCount = derived(jobStore, ($j) => $j.segments.length);
 
 // ── UI Settings ───────────────────────────────────────────────────────────────
 export const selectedLanguage = writable<string>("auto");
-export const selectedModel = writable<string>("medium-q5_0");
+export const selectedModel = writable<string>("small");
 export const performanceMode = writable<"Balanced" | "MaxSpeed">("Balanced");
 export const activeTab = writable<"transcribe" | "review">("transcribe");

@@ -366,9 +366,8 @@
 
           <label class="field-label" for="model-select">Model</label>
           <select id="model-select" class="select" bind:value={$selectedModel}>
-            <option value="small-q5_1">Small (Fast · ~150MB)</option>
-            <option value="medium-q5_0">Medium Q5 (Recommended · ~800MB)</option>
-            <option value="medium">Medium (High Quality · ~1.5GB)</option>
+            <option value="base">Base (Fast · ~141MB)</option>
+            <option value="small">Small (Recommended · ~465MB)</option>
           </select>
 
           {#if !modelAvailable}

@@ -100,6 +100,9 @@ pub fn update_state(
     state: PipelineState,
 ) -> Result<()> {
     let dir = cache_dir(video_path)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AutoSubError::Cache(format!("Failed to create cache dir: {}", e)))?;
+
     let meta = CacheMeta {
         model: model.to_string(),
         lang: lang.to_string(),
@@ -112,7 +115,7 @@ pub fn update_state(
     let meta_json = serde_json::to_string_pretty(&meta)?;
     crate::utils::atomic_write(&dir.join("meta.json"), &meta_json)
         .map_err(|e| AutoSubError::Cache(format!("Failed to update meta.json: {}", e)))?;
-    
+
     Ok(())
 }
 
