@@ -1,6 +1,6 @@
 use crate::error::{AutoSubError, Result};
 use crate::subtitle::Segment;
-use log::{debug, error, info, warn};
+use log::info;
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Stdio;
@@ -55,8 +55,7 @@ pub async fn transcribe(
     threads: usize,
     progress_tx: Option<mpsc::Sender<WhisperProgress>>,
 ) -> Result<Vec<Segment>> {
-    // Try with primary model
-    match run_whisper(
+    run_whisper(
         whisper_bin,
         model_path,
         audio_path,
@@ -66,50 +65,6 @@ pub async fn transcribe(
         &progress_tx,
     )
     .await
-    {
-        Ok(segments) => return Ok(segments),
-        Err(e) => {
-            warn!("Whisper first attempt failed: {}, retrying…", e);
-        }
-    }
-
-    // Retry once with same model
-    match run_whisper(
-        whisper_bin,
-        model_path,
-        audio_path,
-        output_dir,
-        language,
-        threads,
-        &progress_tx,
-    )
-    .await
-    {
-        Ok(segments) => return Ok(segments),
-        Err(e) => {
-            warn!("Whisper retry failed: {}", e);
-        }
-    }
-
-    // Fallback to small model if available
-    let small_model = model_path.replace("medium", "small");
-    if Path::new(&small_model).exists() {
-        warn!("Falling back to small model: {}", small_model);
-        run_whisper(
-            whisper_bin,
-            &small_model,
-            audio_path,
-            output_dir,
-            language,
-            threads,
-            &progress_tx,
-        )
-        .await
-    } else {
-        Err(AutoSubError::WhisperDecode(
-            "All whisper attempts failed or source file corrupt".to_string(),
-        ))
-    }
 }
 
 async fn run_whisper(
@@ -185,6 +140,17 @@ async fn run_whisper(
         });
     }
 
+    // Always consume stderr to prevent deadlocks
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(_line)) = lines.next_line().await {
+                // Just consume line
+            }
+        });
+    }
+
     let status = child.wait().await.map_err(|e| {
         AutoSubError::WhisperDecode(format!("whisper process error: {}", e))
     })?;
@@ -209,7 +175,15 @@ async fn run_whisper(
         AutoSubError::ParseFailed(format!("Failed to read output JSON: {}", e))
     })?;
 
-    let whisper_output: WhisperOutput = serde_json::from_str(&json_str).map_err(|e| {
+    // Robustness: Validate JSON is complete
+    let trimmed_json = json_str.trim();
+    if !trimmed_json.ends_with('}') || !trimmed_json.starts_with('{') {
+        return Err(AutoSubError::ParseFailed(
+            "Whisper output JSON is incomplete or corrupt (missing braces)".to_string(),
+        ));
+    }
+
+    let whisper_output: WhisperOutput = serde_json::from_str(trimmed_json).map_err(|e| {
         AutoSubError::ParseFailed(format!("Failed to parse whisper JSON: {}", e))
     })?;
 

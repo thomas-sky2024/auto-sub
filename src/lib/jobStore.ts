@@ -14,6 +14,8 @@ interface JobStore {
   txtContent: string;
   fromCache: boolean;
   durationSecs: number;
+  downloadSpeed: string;
+  downloadEta: string;
 }
 
 const initialState: JobStore = {
@@ -26,6 +28,8 @@ const initialState: JobStore = {
   txtContent: "",
   fromCache: false,
   durationSecs: 0,
+  downloadSpeed: "",
+  downloadEta: "",
 };
 
 function createJobStore() {
@@ -36,6 +40,9 @@ function createJobStore() {
 
     setRunning: (stage: string, percent: number) =>
       update((s) => ({ ...s, status: "running", stage, percent, error: null })),
+
+    setDownloading: (percent: number, speed: string, eta: string) =>
+      update((s) => ({ ...s, status: "running", stage: "Downloading", percent, downloadSpeed: speed, downloadEta: eta })),
 
     setCompleted: (result: PipelineResult) =>
       update((s) => ({

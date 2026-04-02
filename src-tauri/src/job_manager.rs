@@ -104,7 +104,8 @@ impl JobManager {
                 let mut c = child_arc.lock().unwrap();
                 if let Some(ref mut child) = *c {
                     let _ = child.kill();
-                    info!("job_manager: killed child process");
+                    let _ = child.wait(); // Clean up zombies
+                    info!("job_manager: killed and reaped child process");
                 }
             }
             // Signal the pipeline

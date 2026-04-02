@@ -1,11 +1,28 @@
 use crate::error::{AutoSubError, Result};
-use log::{debug, info, warn};
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const PIPELINE_VERSION: &str = "v5";
 const WHISPER_VERSION: &str = "1.8.4";
+
+/// Current stage of the pipeline for idempotency.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineState {
+    Extracting,
+    Extracted,
+    Transcribing,
+    Transcribed,
+    Validating,
+    Validated,
+    Processing,
+    Processed,
+    Exporting,
+    Completed,
+    Failed,
+}
 
 /// Cache metadata for validation.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -15,6 +32,7 @@ pub struct CacheMeta {
     pub duration: f32,
     pub whisper_version: String,
     pub pipeline_version: String,
+    pub state: PipelineState,
 }
 
 /// Get the cache directory for a given video file.
@@ -46,29 +64,56 @@ pub fn check_cache(video_path: &str, model: &str, lang: &str) -> Result<Option<P
         && meta.lang == lang
         && meta.whisper_version == WHISPER_VERSION
         && meta.pipeline_version == PIPELINE_VERSION
+        && meta.state == PipelineState::Completed
     {
         info!("Cache hit for {} (model={}, lang={})", video_path, model, lang);
         Ok(Some(srt_path))
     } else {
         debug!(
-            "Cache miss: meta mismatch (model: {} vs {}, lang: {} vs {}, whisper: {} vs {}, pipeline: {} vs {})",
-            meta.model, model, meta.lang, lang, meta.whisper_version, WHISPER_VERSION, meta.pipeline_version, PIPELINE_VERSION
+            "Cache miss: meta mismatch or incomplete (model: {} vs {}, lang: {} vs {}, state: {:?})",
+            meta.model, model, meta.lang, lang, meta.state
         );
         Ok(None)
     }
 }
 
 /// Save raw whisper output to cache.
+#[allow(dead_code)]
 pub fn save_raw_json(video_path: &str, raw_json: &str) -> Result<PathBuf> {
     let dir = cache_dir(video_path)?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| AutoSubError::Cache(format!("Failed to create cache dir: {}", e)))?;
 
     let path = dir.join("raw.json");
-    std::fs::write(&path, raw_json)
+    crate::utils::atomic_write(&path, raw_json)
         .map_err(|e| AutoSubError::Cache(format!("Failed to write raw.json: {}", e)))?;
 
     Ok(path)
+}
+
+/// Update only the pipeline state in meta.json.
+pub fn update_state(
+    video_path: &str,
+    model: &str,
+    lang: &str,
+    duration: f32,
+    state: PipelineState,
+) -> Result<()> {
+    let dir = cache_dir(video_path)?;
+    let meta = CacheMeta {
+        model: model.to_string(),
+        lang: lang.to_string(),
+        duration,
+        whisper_version: WHISPER_VERSION.to_string(),
+        pipeline_version: PIPELINE_VERSION.to_string(),
+        state,
+    };
+
+    let meta_json = serde_json::to_string_pretty(&meta)?;
+    crate::utils::atomic_write(&dir.join("meta.json"), &meta_json)
+        .map_err(|e| AutoSubError::Cache(format!("Failed to update meta.json: {}", e)))?;
+    
+    Ok(())
 }
 
 /// Save final SRT and metadata to cache.
@@ -84,21 +129,11 @@ pub fn save_final(
         .map_err(|e| AutoSubError::Cache(format!("Failed to create cache dir: {}", e)))?;
 
     // Save SRT
-    std::fs::write(dir.join("final.srt"), srt_content)
+    crate::utils::atomic_write(&dir.join("final.srt"), srt_content)
         .map_err(|e| AutoSubError::Cache(format!("Failed to write final.srt: {}", e)))?;
 
-    // Save metadata
-    let meta = CacheMeta {
-        model: model.to_string(),
-        lang: lang.to_string(),
-        duration,
-        whisper_version: WHISPER_VERSION.to_string(),
-        pipeline_version: PIPELINE_VERSION.to_string(),
-    };
-
-    let meta_json = serde_json::to_string_pretty(&meta)?;
-    std::fs::write(dir.join("meta.json"), meta_json)
-        .map_err(|e| AutoSubError::Cache(format!("Failed to write meta.json: {}", e)))?;
+    // Save metadata with Completed state
+    update_state(video_path, model, lang, duration, PipelineState::Completed)?;
 
     info!("Cache saved for {}", video_path);
     Ok(())

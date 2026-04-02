@@ -23,29 +23,7 @@ pub async fn extract_audio(
     video_duration_secs: f32,
     progress_tx: Option<mpsc::Sender<FfmpegProgress>>,
 ) -> Result<()> {
-    let max_retries = 2;
-    let mut last_err = String::new();
-
-    for attempt in 0..=max_retries {
-        if attempt > 0 {
-            warn!("ffmpeg retry attempt {}/{}", attempt, max_retries);
-        }
-
-        match run_ffmpeg(ffmpeg_bin, video_path, output_path, video_duration_secs, &progress_tx)
-            .await
-        {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                last_err = e.to_string();
-                error!("ffmpeg attempt {} failed: {}", attempt + 1, last_err);
-            }
-        }
-    }
-
-    Err(AutoSubError::AudioExtract(format!(
-        "Failed after {} retries: {}",
-        max_retries, last_err
-    )))
+    run_ffmpeg(ffmpeg_bin, video_path, output_path, video_duration_secs, &progress_tx).await
 }
 
 async fn run_ffmpeg(

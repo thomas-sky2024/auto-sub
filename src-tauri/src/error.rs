@@ -24,6 +24,18 @@ pub enum AutoSubError {
     #[error("Export error: {0}")]
     Export(String),
 
+    #[error("Download error: {0}")]
+    Download(String),
+
+    #[error("Network error: {0}")]
+    Network(String),
+
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(String),
+
+    #[error("Sidecar not found: {0}")]
+    SidecarNotFound(String),
+
     #[error("Job cancelled")]
     Cancelled,
 
@@ -32,6 +44,9 @@ pub enum AutoSubError {
 
     #[error("Serde error: {0}")]
     Serde(#[from] serde_json::Error),
+
+    #[error("Tauri error: {0}")]
+    Tauri(#[from] tauri::Error),
 }
 
 // Allow serialization to Tauri frontend

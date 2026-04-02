@@ -7,14 +7,22 @@
     jobStore, isRunning, isIdle, hasResult, activeTab,
     selectedLanguage, selectedModel, performanceMode,
   } from "$lib/jobStore";
-  import { startPipeline, cancelJob, checkModel, exportFile } from "$lib/invoke";
+  import { startPipeline, cancelJob, checkModel, exportFile, downloadMedia } from "$lib/invoke";
 
   // ── State ────────────────────────────────────────────────────────────────────
   let videoPath = $state<string | null>(null);
   let videoName = $state<string>("");
   let isDragging = $state(false);
   let modelAvailable = $state(true);
+  
+  // New Source State
+  let sourceType = $state<"file" | "url">("file");
+  let url = $state("");
+  let downloadFormat = $state<"wav" | "mp3" | "mp4">("wav");
+  let saveLocal = $state(false);
+  
   let unlisten: (() => void) | null = null;
+  let unlistenDownload: (() => void) | null = null;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────────
   onMount(async () => {
@@ -25,17 +33,30 @@
         jobStore.setRunning(event.payload.stage, event.payload.percent);
       }
     );
+
+    unlistenDownload = await listen<{ type: string; data: any }>(
+      "download-progress",
+      (event) => {
+        const { percentage, speed, eta } = event.payload.data;
+        jobStore.setDownloading(percentage, speed, eta);
+      }
+    );
   });
 
   onDestroy(() => {
     unlisten?.();
+    unlistenDownload?.();
   });
 
   // ── File Handling ─────────────────────────────────────────────────────────────
   async function pickFile() {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "Video", extensions: ["mp4", "mov", "mkv", "avi", "m4v", "webm"] }],
+      filters: [
+        { name: "Media Files", extensions: ["mp4", "mov", "mkv", "avi", "m4v", "webm", "mp3", "wav", "m4a", "ogg", "flac", "aac"] },
+        { name: "Video", extensions: ["mp4", "mov", "mkv", "avi", "m4v", "webm"] },
+        { name: "Audio", extensions: ["mp3", "wav", "m4a", "ogg", "flac", "aac"] }
+      ],
     });
     if (selected && typeof selected === "string") {
       setVideoPath(selected);
@@ -57,7 +78,7 @@
 
   // ── Pipeline ──────────────────────────────────────────────────────────────────
   async function startTranscription() {
-    if (!videoPath) return;
+    let currentPath = videoPath;
 
     // Verify model exists
     const hasModel = await checkModel($selectedModel);
@@ -68,11 +89,36 @@
     modelAvailable = true;
 
     jobStore.reset();
+
+    // If source is URL, download first
+    if (sourceType === "url") {
+      if (!url) return;
+      jobStore.setDownloading(0, "Connecting...", "...");
+      try {
+        const dlResult = await downloadMedia({
+          url,
+          format: downloadFormat,
+          save_local: saveLocal,
+        });
+        currentPath = dlResult.file_path;
+        videoName = dlResult.title;
+      } catch (err: any) {
+        if (err?.toString().includes("cancel")) {
+          jobStore.setCancelled();
+        } else {
+          jobStore.setFailed(String(err));
+        }
+        return;
+      }
+    }
+
+    if (!currentPath) return;
+
     jobStore.setRunning("Starting…", 0);
 
     try {
       const result = await startPipeline({
-        video_path: videoPath,
+        video_path: currentPath,
         language: $selectedLanguage,
         model: $selectedModel,
         performance_mode: $performanceMode,
@@ -80,7 +126,7 @@
       jobStore.setCompleted(result);
       $activeTab = "review";
     } catch (err: any) {
-      if (err?.toString().includes("cancel") || err?.toString().includes("Cancel")) {
+      if (err?.toString().includes("cancel")) {
         jobStore.setCancelled();
       } else {
         jobStore.setFailed(String(err));
@@ -164,35 +210,79 @@
 
       <!-- Left: File + Settings -->
       <div class="panel settings-panel">
-        <h2 class="panel-title">Source File</h2>
-
-        <!-- Drop Zone -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-          class="dropzone {isDragging ? 'dragging' : ''} {videoPath ? 'has-file' : ''}"
-          role="button"
-          tabindex="0"
-          ondragover={(e) => { e.preventDefault(); isDragging = true; }}
-          ondragleave={() => isDragging = false}
-          ondrop={handleDrop}
-          onclick={pickFile}
-          onkeypress={(e) => e.key === "Enter" && pickFile()}
-        >
-          {#if videoPath}
-            <div class="file-info">
-              <span class="file-icon">🎞️</span>
-              <span class="file-name">{videoName}</span>
-              <span class="file-change">Click to change</span>
-            </div>
-          {:else}
-            <div class="drop-prompt">
-              <span class="drop-icon">⬆️</span>
-              <span class="drop-text">Drop video here</span>
-              <span class="drop-sub">or click to browse</span>
-              <span class="drop-formats">MP4 · MOV · MKV · AVI · M4V</span>
-            </div>
-          {/if}
+        <!-- Source Selection -->
+        <div class="source-tabs">
+          <button 
+            class="source-tab {sourceType === 'file' ? 'active' : ''}" 
+            onclick={() => sourceType = 'file'}
+          >
+            Local File
+          </button>
+          <button 
+            class="source-tab {sourceType === 'url' ? 'active' : ''}" 
+            onclick={() => sourceType = 'url'}
+          >
+            YouTube / URL
+          </button>
         </div>
+
+        {#if sourceType === "file"}
+          <!-- Drop Zone -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="dropzone {isDragging ? 'dragging' : ''} {videoPath ? 'has-file' : ''}"
+            role="button"
+            tabindex="0"
+            ondragover={(e) => { e.preventDefault(); isDragging = true; }}
+            ondragleave={() => isDragging = false}
+            ondrop={handleDrop}
+            onclick={pickFile}
+            onkeypress={(e) => e.key === "Enter" && pickFile()}
+          >
+            {#if videoPath}
+              <div class="file-info">
+                <span class="file-icon">🎞️</span>
+                <span class="file-name">{videoName}</span>
+                <span class="file-change">Click to change</span>
+              </div>
+            {:else}
+              <div class="drop-prompt">
+                <span class="drop-icon">⬆️</span>
+                <span class="drop-text">Drop video/audio here</span>
+                <span class="drop-sub">or click to browse</span>
+                <span class="drop-formats">MP4 · MP3 · WAV · MKV · MOV</span>
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <div class="url-input-container">
+            <label class="field-label" for="url-input">Media URL</label>
+            <input 
+              id="url-input"
+              type="text" 
+              class="input" 
+              placeholder="https://www.youtube.com/watch?v=..." 
+              bind:value={url}
+            />
+            
+            <div class="url-options">
+              <div class="option-item">
+                <label class="field-label" for="dl-format">Format</label>
+                <select id="dl-format" class="select" bind:value={downloadFormat}>
+                  <option value="wav">Transcribe Only (Fastest)</option>
+                  <option value="mp3">Transcribe & Save MP3</option>
+                  <option value="mp4">Transcribe & Save MP4</option>
+                </select>
+              </div>
+              <div class="option-item checkbox-item">
+                <label class="checkbox-label">
+                  <input type="checkbox" bind:checked={saveLocal} />
+                  <span>Save local copy to Downloads</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        {/if}
 
         <!-- Settings -->
         <div class="settings-group">
@@ -245,16 +335,28 @@
             disabled={!videoPath || $isRunning}
             onclick={startTranscription}
           >
-            {videoPath ? "▶ Start Transcription" : "Select a file first"}
+            {sourceType === "file" 
+              ? (videoPath ? "▶ Start Transcription" : "Select a file first")
+              : "▶ Download & Transcribe"}
           </button>
         {/if}
 
         <!-- Progress bar -->
         <div class="progress-container">
           <div class="progress-header">
-            <span class="progress-stage">{$jobStore.stage || "Ready"}</span>
+            <span class="progress-stage">
+              {$jobStore.status === 'downloading' ? 'Downloading Media...' : ($jobStore.stage || "Ready")}
+            </span>
             <span class="progress-pct">{Math.round($jobStore.percent)}%</span>
           </div>
+          
+          {#if $jobStore.status === 'downloading'}
+            <div class="download-meta">
+              <span class="dl-speed">🚀 {$jobStore.downloadSpeed}</span>
+              <span class="dl-eta">⏳ {$jobStore.downloadEta}</span>
+            </div>
+          {/if}
+
           <div class="progress-track">
             <div
               class="progress-fill {$jobStore.status === 'completed' ? 'done' : ''}"
@@ -264,10 +366,16 @@
 
           <!-- Stage indicators -->
           <div class="stage-dots">
-            {#each ["Extracting audio", "Transcribing", "Validating", "Post-processing", "Done"] as stageName, i}
-              <div class="stage-dot {$jobStore.percent > i * 20 ? 'active' : ''}">
+            {#each ["Downloading", "Extracting", "Transcribing", "Done"] as stageName, i}
+              {@const isActive = 
+                (stageName === "Downloading" && $jobStore.status === "downloading") ||
+                (stageName === "Extracting" && $jobStore.stage?.includes("Extracting")) ||
+                (stageName === "Transcribing" && $jobStore.stage?.includes("Transcribing")) ||
+                (stageName === "Done" && $jobStore.status === "completed")
+              }
+              <div class="stage-dot {isActive ? 'active' : ''}">
                 <div class="dot"></div>
-                <span class="dot-label">{stageName.split(" ")[0]}</span>
+                <span class="dot-label">{stageName}</span>
               </div>
             {/each}
           </div>
@@ -520,6 +628,78 @@
   .file-name { font-size: 0.9rem; font-weight: 600; color: #4ade80; word-break: break-all; }
   .file-change { font-size: 0.75rem; color: #5b6080; }
 
+  /* ── Source Selection ────────────────────────────────────────────────────── */
+  .source-tabs {
+    display: flex;
+    background: #0e0f14;
+    padding: 0.25rem;
+    border-radius: 10px;
+    margin-bottom: 1.25rem;
+    border: 1px solid #2a2d3e;
+  }
+  .source-tab {
+    flex: 1;
+    padding: 0.55rem;
+    border: none;
+    background: transparent;
+    color: #6b7194;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: 7px;
+    transition: all 0.2s;
+  }
+  .source-tab.active {
+    background: #252840;
+    color: #a5b4fc;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+
+  .url-input-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  .input {
+    width: 100%;
+    background: #1a1b28;
+    border: 1px solid #2a2d3e;
+    color: #c4c8e2;
+    border-radius: 8px;
+    padding: 0.65rem 0.85rem;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .input:focus { border-color: #7c8cf8; }
+
+  .url-options {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .checkbox-item {
+    padding-top: 0.25rem;
+  }
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.85rem;
+    color: #c4c8e2;
+    cursor: pointer;
+    user-select: none;
+  }
+  .checkbox-label input {
+    accent-color: #7c8cf8;
+    width: 16px;
+    height: 16px;
+  }
+
   /* ── Settings ────────────────────────────────────────────────────────────── */
   .settings-group { display: flex; flex-direction: column; gap: 0.5rem; }
   .field-label {
@@ -609,6 +789,20 @@
   }
   .progress-stage { font-weight: 600; }
   .progress-pct { color: #a5b4fc; }
+
+  .download-meta {
+    display: flex;
+    gap: 1.5rem;
+    font-size: 0.8rem;
+    color: #8b92b8;
+    margin-bottom: 0.8rem;
+    background: #1a1b28;
+    padding: 0.4rem 0.75rem;
+    border-radius: 6px;
+    width: fit-content;
+  }
+  .dl-speed { color: #4ade80; font-weight: 600; }
+  .dl-eta { color: #fbbf24; font-weight: 600; }
 
   .progress-track {
     width: 100%;

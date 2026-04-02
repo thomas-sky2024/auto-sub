@@ -48,15 +48,28 @@ AutoSub is a production-grade, high-performance desktop application for generati
 
 2. **Build whisper.cpp sidecar**:
    ```bash
-   chmod +x build-scripts/build-whisper.sh
+   chmod +x build-scripts/*.sh
    ./build-scripts/build-whisper.sh
    ```
 
-3. **Install dependencies and run**:
+3. **Setup Whisper models**:
+   ```bash
+   ./build-scripts/setup-models.sh
+   ```
+
+4. **Install dependencies and run**:
    ```bash
    pnpm install
    pnpm tauri dev
    ```
+
+## 🛠️ Troubleshooting
+
+### Port 1420 already in use
+If you see an error that port 1420 is in use, run:
+```bash
+lsof -ti:1420 | xargs kill -9
+```
 
 ## 📦 Production Distribution
 

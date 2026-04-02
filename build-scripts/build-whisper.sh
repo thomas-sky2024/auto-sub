@@ -2,7 +2,9 @@
 set -e
 
 # Configuration
-REPO_DIR=$(pwd)
+# Find the project root directory (one level up from this script's directory)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WHISPER_DIR="$REPO_DIR/build-scripts/whisper.cpp"
 ARCH=$(uname -m)
 
@@ -48,11 +50,16 @@ echo "Step 3: Building..."
 make -j$(sysctl -n hw.ncpu)
 
 echo "Step 4: Copying binary..."
-# Find the CLI binary (name varies by version)
+# Ensure destination directory exists
+mkdir -p "$(dirname "$BINARY_DEST")"
+
+# Find the CLI binary
 if [ -f "bin/whisper-cli" ]; then
     cp bin/whisper-cli "$BINARY_DEST"
 elif [ -f "bin/main" ]; then
     cp bin/main "$BINARY_DEST"
+elif [ -f "examples/cli/whisper-cli" ]; then
+    cp examples/cli/whisper-cli "$BINARY_DEST"
 else
     echo "❌ Could not find whisper binary"
     exit 1

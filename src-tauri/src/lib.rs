@@ -1,4 +1,5 @@
 mod cache;
+mod downloader;
 mod error;
 mod ffmpeg;
 mod job_manager;
@@ -6,13 +7,14 @@ mod pipeline;
 mod post_process;
 mod subtitle;
 mod thermal;
+mod utils;
 mod validator;
 mod whisper;
 
 use job_manager::JobManager;
 use pipeline::{PipelineOptions, PipelineResult};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 /// Shared app state — thread-safe job manager.
 pub struct AppState {
@@ -117,6 +119,7 @@ pub fn run() {
             check_model,
             list_models,
             export_file,
+            downloader::download_media,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AutoSub");

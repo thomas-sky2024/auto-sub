@@ -2,7 +2,7 @@ use crate::{
     cache, error::{AutoSubError, Result},
     ffmpeg, job_manager::JobManager, post_process, subtitle, thermal, validator, whisper,
 };
-use log::info;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,10 +80,6 @@ pub async fn run(
         });
     }
 
-    // ── Stage 1: Audio extraction ─────────────────────────────────────────────
-    emit_progress(&app, "Extracting audio", 5.0, 0);
-    job_mgr.update_progress("Extracting audio", 5.0);
-
     let ffmpeg_bin = resolve_bin("ffmpeg");
     let whisper_bin = resolve_bin("whisper-main");
     let model_path = resolve_model(model_name);
@@ -93,6 +89,11 @@ pub async fn run(
         .await
         .unwrap_or(0.0);
 
+    // ── Stage 1: Audio extraction ─────────────────────────────────────────────
+    emit_progress(&app, "Extracting audio", 5.0, 0);
+    job_mgr.update_progress("Extracting audio", 5.0);
+    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Extracting)?;
+
     // Set up audio output path
     let cache_dir = cache::cache_dir(video_path)?;
     tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| {
@@ -100,58 +101,85 @@ pub async fn run(
     })?;
     let audio_path = cache_dir.join("audio.wav").to_string_lossy().to_string();
 
-    // Progress forwarding from ffmpeg
-    let (ffmpeg_tx, mut ffmpeg_rx) = mpsc::channel::<ffmpeg::FfmpegProgress>(32);
-    let app_clone = app.clone();
-    let jm_clone = job_mgr.clone();
-    tokio::spawn(async move {
-        while let Some(p) = ffmpeg_rx.recv().await {
-            let scaled = 5.0 + p.percent * 0.30; // 5% → 35%
-            emit_progress(&app_clone, "Extracting audio", scaled, 0);
-            jm_clone.update_progress("Extracting audio", scaled);
-        }
-    });
 
-    ffmpeg::extract_audio(
-        &ffmpeg_bin,
-        video_path,
-        &audio_path,
-        duration_secs,
-        Some(ffmpeg_tx),
-    )
-    .await?;
+    // Run ffmpeg with retry
+    crate::utils::retry(|| {
+        let (tx, mut rx) = mpsc::channel::<ffmpeg::FfmpegProgress>(32);
+        let app_clone = app.clone();
+        let jm_clone = job_mgr.clone();
+        tokio::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                let scaled = 5.0 + p.percent * 0.30; // 5% → 35%
+                emit_progress(&app_clone, "Extracting audio", scaled, 0);
+                jm_clone.update_progress("Extracting audio", scaled);
+            }
+        });
+        ffmpeg::extract_audio(
+            &ffmpeg_bin,
+            video_path,
+            &audio_path,
+            duration_secs,
+            Some(tx),
+        )
+    }, 2).await?;
+
+    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Extracted)?;
 
     emit_progress(&app, "Transcribing", 35.0, 0);
     job_mgr.update_progress("Transcribing", 35.0);
+    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Transcribing)?;
 
     // ── Stage 2: Whisper transcription ────────────────────────────────────────
     let threads = thermal::recommended_threads(opts.performance_mode);
     let output_dir = cache_dir.to_string_lossy().to_string();
 
-    let (whisper_tx, mut whisper_rx) = mpsc::channel::<whisper::WhisperProgress>(32);
-    let app_clone = app.clone();
-    let jm_clone = job_mgr.clone();
-    tokio::spawn(async move {
-        while let Some(p) = whisper_rx.recv().await {
-            let scaled = 35.0 + p.percent * 0.45; // 35% → 80%
-            emit_progress(&app_clone, "Transcribing", scaled, 0);
-            jm_clone.update_progress("Transcribing", scaled);
+    // Run whisper with retry and fallback
+    let raw_segments = match crate::utils::retry(|| {
+        let (tx, mut rx) = mpsc::channel::<whisper::WhisperProgress>(32);
+        let app_clone = app.clone();
+        let jm_clone = job_mgr.clone();
+        tokio::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                let scaled = 35.0 + p.percent * 0.45; // 35% → 80%
+                emit_progress(&app_clone, "Transcribing", scaled, 0);
+                jm_clone.update_progress("Transcribing", scaled);
+            }
+        });
+        whisper::transcribe(
+            &whisper_bin,
+            &model_path,
+            &audio_path,
+            &output_dir,
+            lang,
+            threads,
+            Some(tx),
+        )
+    }, 2).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Primary model failed, attempting fallback to small model: {}", e);
+            let small_model = model_path.replace(model_name, "small");
+            if std::path::Path::new(&small_model).exists() {
+                whisper::transcribe(
+                    &whisper_bin,
+                    &small_model,
+                    &audio_path,
+                    &output_dir,
+                    lang,
+                    threads,
+                    None,
+                ).await?
+            } else {
+                return Err(e);
+            }
         }
-    });
+    };
 
-    let raw_segments = whisper::transcribe(
-        &whisper_bin,
-        &model_path,
-        &audio_path,
-        &output_dir,
-        lang,
-        threads,
-        Some(whisper_tx),
-    )
-    .await?;
+    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Transcribed)?;
 
     emit_progress(&app, "Validating", 80.0, raw_segments.len());
     job_mgr.update_progress("Validating", 80.0);
+    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Validating)?;
 
     // ── Stage 3: Validation ───────────────────────────────────────────────────
     let validated = validator::validate(raw_segments);
@@ -160,10 +188,14 @@ pub async fn run(
     job_mgr.update_progress("Post-processing", 85.0);
 
     // ── Stage 4: Post-processing ──────────────────────────────────────────────
+    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Processing)?;
     let processed = post_process::process(validated);
+
+    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Processed)?;
 
     emit_progress(&app, "Exporting", 95.0, processed.len());
     job_mgr.update_progress("Exporting", 95.0);
+    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Exporting)?;
 
     // ── Stage 5: Export ───────────────────────────────────────────────────────
     let srt_content = subtitle::to_srt(&processed);
