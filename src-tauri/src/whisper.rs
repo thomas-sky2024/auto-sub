@@ -121,12 +121,11 @@ async fn run_whisper(
         "5".to_string(),
         "-t".to_string(),
         threads.to_string(),
-        "--no-context".to_string(),
         "--max-len".to_string(),
         "60".to_string(),
         "--temperature".to_string(),
         "0".to_string(),
-        "-vad".to_string(), // Voice Activity Detection for suppression of silence
+        "--vad".to_string(), // Voice Activity Detection for suppression of silence
         "--print-progress".to_string(),
     ];
 
