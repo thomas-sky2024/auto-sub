@@ -7,6 +7,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
 
 /// Progress update from whisper.
 #[derive(Debug, Clone)]
@@ -55,6 +56,31 @@ pub async fn transcribe(
     threads: usize,
     progress_tx: Option<mpsc::Sender<WhisperProgress>>,
 ) -> Result<Vec<Segment>> {
+    // Validate audio file exists and has content
+    if !Path::new(audio_path).exists() {
+        return Err(AutoSubError::WhisperDecode(format!(
+            "Audio file not found at {}. FFmpeg extraction may have failed.",
+            audio_path
+        )));
+    }
+
+    let audio_metadata = std::fs::metadata(audio_path).map_err(|e| {
+        AutoSubError::WhisperDecode(format!("Failed to read audio file metadata: {}", e))
+    })?;
+
+    if audio_metadata.len() == 0 {
+        return Err(AutoSubError::WhisperDecode(
+            "Audio file is empty. Source video may have no audio or FFmpeg extraction failed.".to_string(),
+        ));
+    }
+
+    if audio_metadata.len() < 44 {
+        return Err(AutoSubError::WhisperDecode(format!(
+            "Audio file is too small ({} bytes) - likely invalid or corrupted.",
+            audio_metadata.len()
+        )));
+    }
+
     run_whisper(
         whisper_bin,
         model_path,
@@ -125,6 +151,8 @@ async fn run_whisper(
         .spawn()
         .map_err(|e| AutoSubError::WhisperDecode(format!("Failed to spawn whisper: {}", e)))?;
 
+    let (stderr_tx, mut stderr_rx) = mpsc::channel::<String>(256);
+
     // Parse stdout/stderr for progress
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
@@ -147,13 +175,14 @@ async fn run_whisper(
         });
     }
 
-    // Always consume stderr to prevent deadlocks
+    // Capture stderr for error reporting
     if let Some(stderr) = child.stderr.take() {
+        let stderr_tx = stderr_tx.clone();
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
-            while let Ok(Some(_line)) = lines.next_line().await {
-                // Just consume line
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = stderr_tx.send(line).await;
             }
         });
     }
@@ -162,19 +191,56 @@ async fn run_whisper(
         AutoSubError::WhisperDecode(format!("whisper process error: {}", e))
     })?;
 
+    // Collect any stderr output that was captured
+    let mut stderr_output = Vec::new();
+    while let Ok(Some(line)) = timeout(Duration::from_millis(100), stderr_rx.recv()).await {
+        stderr_output.push(line);
+    }
+
     if !status.success() {
+        let stderr_msg = if !stderr_output.is_empty() {
+            format!("\nwhisper stderr: {}", stderr_output.join("\n"))
+        } else {
+            String::new()
+        };
+
         return Err(AutoSubError::WhisperDecode(format!(
-            "whisper exited with code: {:?}",
-            status.code()
+            "whisper exited with code: {:?}{}",
+            status.code(),
+            stderr_msg
         )));
     }
 
     // Parse output JSON
     let json_path = format!("{}.json", output_base);
     if !Path::new(&json_path).exists() {
+        // Check what files were actually created
+        let output_dir_path = Path::new(output_dir);
+        let files_in_dir = std::fs::read_dir(output_dir_path)
+            .ok()
+            .and_then(|entries| {
+                let filenames: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect();
+                if filenames.is_empty() {
+                    None
+                } else {
+                    Some(filenames.join(", "))
+                }
+            })
+            .unwrap_or_else(|| "Could not read directory".to_string());
+
+        let stderr_msg = if !stderr_output.is_empty() {
+            format!("\nwhisper stderr: {}", stderr_output.join("\n"))
+        } else {
+            String::new()
+        };
+
         return Err(AutoSubError::ParseFailed(format!(
-            "Output JSON not found at {}",
-            json_path
+            "whisper did not produce output.json at {}. Files in output dir: {}. \
+             Possible causes: invalid audio format, corrupted audio file, or whisper process error.{}",
+            json_path, files_in_dir, stderr_msg
         )));
     }
 
