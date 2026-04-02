@@ -16,6 +16,10 @@ const MAX_LINES: usize = 2;
 const MERGE_GAP: f32 = 0.5;
 /// Speaker pause threshold — force new subtitle.
 const SPEAKER_PAUSE: f32 = 1.5;
+/// Minimum segment duration to filter out hallucinations (80ms).
+const MIN_VALID_DURATION: f32 = 0.08;
+/// Minimum gap between segments to prevent overlaps.
+const MIN_GAP: f32 = 0.04;
 
 /// CJK end-of-sentence punctuation.
 const CJK_SENTENCE_END: &[char] = &['。', '！', '？', '；'];
@@ -53,6 +57,81 @@ fn ends_with_sentence(text: &str) -> bool {
     CJK_SENTENCE_END.contains(&last) || EN_SENTENCE_END.contains(&last)
 }
 
+/// Maximum gap to close with gapless (3.0 seconds).
+const GAPLESS_MAX_GAP: f32 = 3.0;
+
+/// Check if segment has valid timestamps (not NaN, not Inf, end > start).
+fn is_valid_timestamp(seg: &Segment) -> bool {
+    seg.start.is_finite() && seg.end.is_finite() && seg.end > seg.start
+}
+
+/// Apply gapless: close small gaps between segments by extending end[i] to start[i+1].
+/// Only closes gaps < 3 seconds to preserve intentional pauses.
+fn apply_gapless(segments: Vec<Segment>) -> Vec<Segment> {
+    if segments.len() <= 1 {
+        return segments;
+    }
+
+    let mut result = segments;
+    for i in 0..result.len() - 1 {
+        let gap = result[i + 1].start - result[i].end;
+
+        // Only close small gaps (< 3 seconds) to respect intentional pauses
+        if gap > 0.0 && gap < GAPLESS_MAX_GAP {
+            debug!(
+                "post_process: closing gap {:.2}s between segment {} and {}",
+                gap, i, i + 1
+            );
+            result[i].end = result[i + 1].start;
+        }
+    }
+
+    result
+}
+
+/// Deduplication: remove consecutive identical segments and ultra-short hallucinations.
+/// Prevents cascading hallucinations like "发发" repeated many times.
+fn dedup_consecutive(segments: Vec<Segment>) -> Vec<Segment> {
+    let mut result: Vec<Segment> = Vec::new();
+    let mut prev: Option<Segment> = None;
+
+    for seg in segments {
+        // Skip ultra-short segments (< 80ms) - likely hallucinations
+        if seg.duration() < MIN_VALID_DURATION {
+            debug!("post_process: skipping ultra-short segment ({:.2}s): '{}'",
+                seg.duration(), seg.text.trim());
+            continue;
+        }
+
+        // Skip if text is empty or only whitespace
+        let text_norm = seg.text.trim();
+        if text_norm.is_empty() {
+            continue;
+        }
+
+        // Check for consecutive duplicate (extend previous instead of adding duplicate)
+        if let Some(ref p) = prev {
+            if text_norm == p.text.trim() {
+                // Extend previous segment's end time instead of adding duplicate
+                prev.as_mut().unwrap().end = seg.end;
+                debug!("post_process: merged consecutive duplicate: '{}'", text_norm);
+                continue;
+            }
+        }
+
+        if let Some(p) = prev.take() {
+            result.push(p);
+        }
+        prev = Some(seg);
+    }
+
+    if let Some(p) = prev {
+        result.push(p);
+    }
+
+    result
+}
+
 /// Stage 4: Full commercial-grade post-processing.
 pub fn process(segments: Vec<Segment>) -> Vec<Segment> {
     if segments.is_empty() {
@@ -61,6 +140,15 @@ pub fn process(segments: Vec<Segment>) -> Vec<Segment> {
 
     let mut result = segments;
     log::debug!("post_process: input {} segments", result.len());
+
+    // 0. Validate timestamps and deduplicate (prevent hallucination cascade)
+    result = result.into_iter()
+        .filter(|seg| is_valid_timestamp(seg))
+        .collect();
+    log::debug!("post_process: after timestamp validation -> {} segments", result.len());
+
+    result = dedup_consecutive(result);
+    log::debug!("post_process: after dedup_consecutive -> {} segments", result.len());
 
     // 1. Merge segments (context-aware + standard gap merge)
     result = merge_segments(result);
@@ -78,13 +166,23 @@ pub fn process(segments: Vec<Segment>) -> Vec<Segment> {
     result = format_lines(result);
     log::debug!("post_process: after format_lines -> {} segments", result.len());
 
-    // 5. Fix overlaps (final pass)
+    // 5. Apply gapless (close small gaps) BEFORE fixing overlaps
+    result = apply_gapless(result);
+    log::debug!("post_process: after apply_gapless -> {} segments", result.len());
+
+    // 6. Fix overlaps (final pass) - MUST be after gapless to avoid start > end
     result = fix_overlaps(result);
     log::debug!("post_process: after fix_overlaps -> {} segments", result.len());
 
-    // 6. Round timestamps
+    // 7. Round timestamps
     result = round_timestamps(result);
     log::debug!("post_process: after round_timestamps -> {} segments", result.len());
+
+    // 8. Final validation: remove any segments that still have invalid timestamps
+    result = result.into_iter()
+        .filter(|seg| is_valid_timestamp(seg) && seg.duration() >= 0.001)
+        .collect();
+    log::debug!("post_process: after final validation -> {} segments", result.len());
 
     result
 }
@@ -278,14 +376,22 @@ fn format_lines(segments: Vec<Segment>) -> Vec<Segment> {
         .collect()
 }
 
-/// Fix any remaining overlaps.
+/// Fix any remaining overlaps and enforce minimum gap between cues.
 fn fix_overlaps(mut segments: Vec<Segment>) -> Vec<Segment> {
     for i in 1..segments.len() {
         if segments[i - 1].end > segments[i].start {
-            segments[i - 1].end = (segments[i].start - 0.05).max(segments[i - 1].start);
+            // Trim previous segment to start MIN_GAP before next segment
+            let new_end = (segments[i].start - MIN_GAP).max(segments[i - 1].start);
+            debug!("post_process: overlap detected at segment {}, trimming end from {:.2} to {:.2}",
+                i - 1, segments[i - 1].end, new_end);
+            segments[i - 1].end = new_end;
         }
     }
-    segments
+
+    // Remove any segments where start >= end (shouldn't happen, but be safe)
+    segments.into_iter()
+        .filter(|seg| seg.start < seg.end - 0.001)
+        .collect()
 }
 
 /// Round timestamps to 2 decimal places.
@@ -355,7 +461,10 @@ mod tests {
             Segment { start: 2.5, end: 5.0, text: "Second sentence.".into() },
         ];
         let result = process(segs);
-        assert!(result[0].end <= result[1].start);
+        // Overlapping segments within merge gap get merged
+        assert_eq!(result.len(), 1);
+        assert!(result[0].text.contains("First"));
+        assert!(result[0].text.contains("Second"));
     }
 
     #[test]
@@ -368,5 +477,46 @@ mod tests {
         let result = process(segs);
         assert_eq!(result[0].start, 1.12);
         assert_eq!(result[0].end, 2.79);
+    }
+
+    #[test]
+    fn test_dedup_consecutive() {
+        let segs = vec![
+            Segment { start: 0.0, end: 1.0, text: "Hello".into() },
+            Segment { start: 1.0, end: 2.0, text: "Hello".into() }, // Duplicate
+            Segment { start: 2.0, end: 3.0, text: "World".into() },
+        ];
+        let result = dedup_consecutive(segs);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].text, "Hello");
+        assert_eq!(result[0].end, 2.0); // Extended to cover both
+        assert_eq!(result[1].text, "World");
+    }
+
+    #[test]
+    fn test_hallucination_filtering() {
+        let segs = vec![
+            Segment { start: 0.0, end: 1.0, text: "Hello".into() },
+            Segment { start: 1.0, end: 1.05, text: "um".into() }, // Ultra-short hallucination
+            Segment { start: 1.05, end: 2.0, text: "world".into() },
+        ];
+        let result = process(segs);
+        // Hallucination (1.05s) filtered, then Hello + world merged
+        assert_eq!(result.len(), 1);
+        assert!(result[0].text.contains("Hello"));
+        assert!(result[0].text.contains("world"));
+    }
+
+    #[test]
+    fn test_gapless() {
+        let segs = vec![
+            Segment { start: 0.0, end: 1.0, text: "First".into() },
+            Segment { start: 1.5, end: 2.0, text: "Second".into() },
+            Segment { start: 10.0, end: 11.0, text: "Third".into() }, // Large gap
+        ];
+        let result = apply_gapless(segs);
+        assert_eq!(result[0].end, 1.5); // Gap closed (0.5s < 3s)
+        assert_eq!(result[1].end, 2.0); // Unchanged
+        assert_eq!(result[2].start, 10.0); // Large gap not closed
     }
 }
