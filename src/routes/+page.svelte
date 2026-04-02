@@ -369,7 +369,7 @@
             <option value="base">Base (Fast · ~141MB)</option>
             <option value="small">Small (~465MB)</option>
             <option value="medium">Medium (~1.5GB)</option>
-            <option value="large-v3">Large v3 (Highest Accuracy · ~2.9GB)</option>
+            <option value="large-v2">Large v2 (Highest Accuracy · ~2.9GB)</option>
           </select>
 
           {#if !modelAvailable}
