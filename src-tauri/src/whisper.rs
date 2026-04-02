@@ -1,6 +1,6 @@
 use crate::error::{AutoSubError, Result};
 use crate::subtitle::Segment;
-use log::info;
+use log::{info, warn};
 use serde::Deserialize;
 use std::path::Path;
 use tauri_plugin_shell::process::{Command, CommandEvent};
@@ -43,7 +43,6 @@ fn parse_timestamp(ts: &str) -> f32 {
 }
 
 /// Run whisper-main CLI on an audio file.
-/// Retries once on failure, then falls back to `small` model.
 pub async fn transcribe(
     sidecar: Command,
     model_path: &str,
@@ -67,7 +66,8 @@ pub async fn transcribe(
 
     if audio_metadata.len() == 0 {
         return Err(AutoSubError::WhisperDecode(
-            "Audio file is empty. Source video may have no audio or FFmpeg extraction failed.".to_string(),
+            "Audio file is empty. Source video may have no audio or FFmpeg extraction failed."
+                .to_string(),
         ));
     }
 
@@ -111,19 +111,22 @@ async fn run_whisper(
         model_path.to_string(),
         "-f".to_string(),
         audio_path.to_string(),
-        "-oj".to_string(),
+        "-oj".to_string(), // Output JSON
         "-of".to_string(),
         output_base.clone(),
         "-bs".to_string(),
-        "5".to_string(),
+        "5".to_string(), // Beam size 5
         "-t".to_string(),
         threads.to_string(),
         "--max-len".to_string(),
         "60".to_string(),
         "--temperature".to_string(),
         "0".to_string(),
-        "--vad".to_string(), // Voice Activity Detection for suppression of silence
         "--print-progress".to_string(),
+        // NOTE: --vad flag is intentionally omitted.
+        // It requires a separate silero VAD model file (--vad-model path).
+        // Passing --vad without a model path causes whisper to crash with
+        // "failed to open VAD model ''" and a Metal GGML_ASSERT abort.
     ];
 
     // Add language flag
@@ -133,105 +136,180 @@ async fn run_whisper(
         args.extend(["-l".to_string(), language.to_string()]);
     }
 
-    let (mut rx, mut _child) = sidecar
-        .args(&args)
-        .spawn()
-        .map_err(|e| AutoSubError::WhisperDecode(format!("Failed to spawn whisper sidecar: {}", e)))?;
+    let (mut rx, _child) = sidecar.args(&args).spawn().map_err(|e| {
+        AutoSubError::WhisperDecode(format!("Failed to spawn whisper sidecar: {}", e))
+    })?;
 
-    let mut stderr_output = Vec::new();
+    let mut stderr_lines: Vec<String> = Vec::new();
 
     loop {
         match rx.recv().await {
-            Some(event) => {
-                match event {
-                    CommandEvent::Stdout(line) => {
-                        let line_str = String::from_utf8_lossy(&line);
-                        // whisper --print-progress outputs "progress = XX%"
-                        if line_str.contains("progress =") {
-                            if let Some(pct_str) = line_str.split('=').nth(1) {
-                                if let Ok(pct) = pct_str.trim().trim_end_matches('%').parse::<f32>() {
-                                    if let Some(ref tx) = progress_tx {
-                                        let _ = tx.send(WhisperProgress { percent: pct }).await;
-                                    }
+            Some(event) => match event {
+                // whisper.cpp writes progress to STDERR, not stdout
+                CommandEvent::Stderr(line) => {
+                    let line_str = String::from_utf8_lossy(&line).to_string();
+
+                    // Parse progress: whisper outputs "whisper_full: progress = XX%"
+                    if line_str.contains("progress =") {
+                        if let Some(pct_str) = line_str.split('=').nth(1) {
+                            let pct_clean = pct_str.trim().trim_end_matches('%');
+                            if let Ok(pct) = pct_clean.parse::<f32>() {
+                                if let Some(ref tx) = progress_tx {
+                                    let _ = tx.send(WhisperProgress { percent: pct }).await;
                                 }
                             }
                         }
                     }
-                    CommandEvent::Stderr(line) => {
-                        let line_str = String::from_utf8_lossy(&line);
-                        stderr_output.push(line_str.to_string());
-                    }
-                    CommandEvent::Terminated(payload) => {
-                        if payload.code == Some(0) {
-                            info!("whisper: process terminated successfully");
-                            break;
-                        } else {
-                            let stderr_msg = if !stderr_output.is_empty() {
-                                format!("\nwhisper stderr: {}", stderr_output.join("\n"))
-                            } else {
-                                String::new()
-                            };
-                            return Err(AutoSubError::WhisperDecode(format!(
-                                "whisper exited with code: {:?}{}",
-                                payload.code,
-                                stderr_msg
-                            )));
+
+                    // Collect stderr for error reporting
+                    stderr_lines.push(line_str);
+                }
+
+                CommandEvent::Stdout(line) => {
+                    // whisper may also write some info to stdout; collect for debugging
+                    let line_str = String::from_utf8_lossy(&line).to_string();
+                    if line_str.contains("progress =") {
+                        if let Some(pct_str) = line_str.split('=').nth(1) {
+                            let pct_clean = pct_str.trim().trim_end_matches('%');
+                            if let Ok(pct) = pct_clean.parse::<f32>() {
+                                if let Some(ref tx) = progress_tx {
+                                    let _ = tx.send(WhisperProgress { percent: pct }).await;
+                                }
+                            }
                         }
                     }
-                    _ => {}
                 }
+
+                CommandEvent::Terminated(payload) => {
+                    if payload.code == Some(0) {
+                        info!("whisper: process terminated successfully");
+                        break;
+                    } else {
+                        // Filter stderr to the most useful lines (skip verbose model-loading lines)
+                        let relevant_stderr: Vec<&str> = stderr_lines
+                            .iter()
+                            .filter(|l| {
+                                let l = l.to_lowercase();
+                                l.contains("error")
+                                    || l.contains("failed")
+                                    || l.contains("assert")
+                                    || l.contains("cannot")
+                            })
+                            .map(|s| s.as_str())
+                            .take(10)
+                            .collect();
+
+                        let stderr_msg = if !relevant_stderr.is_empty() {
+                            format!("\nwhisper stderr:\n{}", relevant_stderr.join("\n"))
+                        } else if !stderr_lines.is_empty() {
+                            // Fall back to last few lines
+                            let tail: Vec<&str> = stderr_lines
+                                .iter()
+                                .rev()
+                                .take(5)
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+                            format!("\nwhisper stderr (last 5 lines):\n{}", tail.join("\n"))
+                        } else {
+                            String::new()
+                        };
+
+                        return Err(AutoSubError::WhisperDecode(format!(
+                            "whisper exited with code: {:?}{}",
+                            payload.code, stderr_msg
+                        )));
+                    }
+                }
+                _ => {}
+            },
+            None => {
+                // If the channel closes but we haven't seen a Success termination,
+                // it likely means the process crashed or was killed prematurely.
+                warn!("whisper: event channel closed unexpectedly - process may have crashed");
+                
+                let stderr_msg = if !stderr_lines.is_empty() {
+                    let tail: Vec<&str> = stderr_lines
+                        .iter()
+                        .rev()
+                        .take(10)
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    format!("\nwhisper stderr (last 10 lines):\n{}", tail.join("\n"))
+                } else {
+                    "No stderr available.".to_string()
+                };
+
+                return Err(AutoSubError::WhisperDecode(format!(
+                    "whisper process disconnected prematurely. Possible OOM or crash.{}",
+                    stderr_msg
+                )));
             }
-            None => break,
         }
     }
 
-    // Parse output JSON
+    // ── Parse output JSON ──────────────────────────────────────────────────────
     let json_path = format!("{}.json", output_base);
     if !Path::new(&json_path).exists() {
-        // Check what files were actually created
         let output_dir_path = Path::new(output_dir);
         let files_in_dir = std::fs::read_dir(output_dir_path)
             .ok()
-            .and_then(|entries| {
-                let filenames: Vec<String> = entries
+            .map(|entries| {
+                entries
                     .filter_map(|e| e.ok())
                     .filter_map(|e| e.file_name().into_string().ok())
-                    .collect();
-                if filenames.is_empty() {
-                    None
-                } else {
-                    Some(filenames.join(", "))
-                }
+                    .collect::<Vec<_>>()
+                    .join(", ")
             })
             .unwrap_or_else(|| "Could not read directory".to_string());
 
-        let stderr_msg = if !stderr_output.is_empty() {
-            format!("\nwhisper stderr: {}", stderr_output.join("\n"))
+        let stderr_msg = if !stderr_lines.is_empty() {
+            let tail: Vec<&str> = stderr_lines
+                .iter()
+                .rev()
+                .take(8)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            format!("\nwhisper stderr:\n{}", tail.join("\n"))
         } else {
             String::new()
         };
 
         return Err(AutoSubError::ParseFailed(format!(
-            "whisper did not produce output.json at {}. Files in output dir: {}. \
-             Possible causes: invalid audio format, corrupted audio file, or whisper process error.{}",
+            "whisper did not produce output.json at {}.\nFiles in output dir: [{}]\n\
+             Possible causes: invalid audio format, corrupted audio, or whisper crash.{}",
             json_path, files_in_dir, stderr_msg
         )));
     }
 
-    let json_str = tokio::fs::read_to_string(&json_path).await.map_err(|e| {
-        AutoSubError::ParseFailed(format!("Failed to read output JSON: {}", e))
-    })?;
+    let json_str = tokio::fs::read_to_string(&json_path)
+        .await
+        .map_err(|e| AutoSubError::ParseFailed(format!("Failed to read output JSON: {}", e)))?;
 
-    // Robustness: Validate JSON is complete
+    // Validate JSON completeness before parsing
     let trimmed_json = json_str.trim();
-    if !trimmed_json.ends_with('}') || !trimmed_json.starts_with('{') {
+    if !trimmed_json.starts_with('{') || !trimmed_json.ends_with('}') {
         return Err(AutoSubError::ParseFailed(
-            "Whisper output JSON is incomplete or corrupt (missing braces)".to_string(),
+            "Whisper output JSON is incomplete or corrupt (missing braces). \
+             The process may have been interrupted."
+                .to_string(),
         ));
     }
 
     let whisper_output: WhisperOutput = serde_json::from_str(trimmed_json).map_err(|e| {
-        AutoSubError::ParseFailed(format!("Failed to parse whisper JSON: {}", e))
+        AutoSubError::ParseFailed(format!(
+            "Failed to parse whisper JSON: {}. First 200 chars: {}",
+            e,
+            &trimmed_json[..trimmed_json.len().min(200)]
+        ))
     })?;
 
     let segments: Vec<Segment> = whisper_output
@@ -244,6 +322,9 @@ async fn run_whisper(
         })
         .collect();
 
-    info!("whisper: transcription complete, {} segments", segments.len());
+    info!(
+        "whisper: transcription complete, {} segments",
+        segments.len()
+    );
     Ok(segments)
 }

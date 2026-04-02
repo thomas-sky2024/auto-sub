@@ -10,8 +10,8 @@ mkdir -p "$DEST_DIR"
 
 echo "📂 Created models directory at $DEST_DIR"
 
-# Download base and small models if they don't exist
-models=("base" "small")
+# Download base, small, medium, large-v2, and large-v3 models if they don't exist
+models=("base" "small" "medium" "large-v2" "large-v3")
 
 for model in "${models[@]}"; do
     if [ ! -f "$DEST_DIR/ggml-$model.bin" ]; then

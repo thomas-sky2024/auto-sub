@@ -177,6 +177,11 @@ pub async fn run(
             AutoSubError::SidecarNotFound(format!("whisper-main sidecar not found: {}", e))
         )?;
 
+        info!(
+            "Transcription stage: using model '{}' with whisper-main sidecar",
+            model_name
+        );
+
         whisper::transcribe(
             sidecar,
             &model_path,
@@ -189,7 +194,10 @@ pub async fn run(
     }, 2).await {
         Ok(s) => s,
         Err(e) => {
-            warn!("Primary model failed, attempting fallback to small model: {}", e);
+            warn!(
+                "Primary model '{}' failed or not found, attempting fallback to 'small' model: {}",
+                model_name, e
+            );
 
             // Use ModelManager to construct fallback path properly
             if ModelManager::verify_model("small") {
