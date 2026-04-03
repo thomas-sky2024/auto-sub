@@ -19,10 +19,12 @@ const MAX_DURATION: f32 = 8.0;
 const MAX_LINE_LEN: usize = 42;
 /// Maximum lines per subtitle.
 const MAX_LINES: usize = 2;
-/// Merge gap threshold in seconds.
-const MERGE_GAP: f32 = 0.5;
+/// Merge gap threshold in seconds (respect speaker rhythm).
+const MERGE_GAP: f32 = 0.2;
+/// Maximum duration when merging segments.
+const MAX_MERGE_DURATION: f32 = 4.0;
 /// Speaker pause threshold — force new subtitle.
-const SPEAKER_PAUSE: f32 = 1.5;
+const SPEAKER_PAUSE: f32 = 0.3;
 /// Minimum segment duration to filter out hallucinations (80ms).
 const MIN_VALID_DURATION: f32 = 0.08;
 /// Minimum gap between segments to prevent overlaps.
@@ -190,7 +192,7 @@ pub fn process(segments: Vec<Segment>) -> Vec<Segment> {
     result
 }
 
-/// Merge segments based on gap and sentence continuity.
+/// Merge segments based on gap and sentence continuity (respect speaker rhythm).
 fn merge_segments(segments: Vec<Segment>) -> Vec<Segment> {
     if segments.is_empty() {
         return segments;
@@ -202,35 +204,38 @@ fn merge_segments(segments: Vec<Segment>) -> Vec<Segment> {
         let prev = result.last().unwrap();
         let gap = seg.start - prev.end;
 
-        // Speaker pause: never merge if gap > 1.5s
+        // Rule 1: BREAK ON SPEAKER PAUSE (respect rhythm > 0.3s)
         if gap > SPEAKER_PAUSE {
             debug!("post: speaker pause ({:.2}s), new subtitle", gap);
             result.push(seg);
             continue;
         }
 
-        // Context-aware merge: same sentence continues (prev doesn't end with punctuation)
-        let should_merge = if gap <= MERGE_GAP {
-            true // standard gap merge
-        } else {
-            // gap between 0.5s and 1.5s — merge only if same sentence
-            !ends_with_sentence(&prev.text)
-        };
+        let prev_text = prev.text.trim();
 
-        if should_merge {
-            let merged_text = if is_cjk_text(&prev.text) {
-                format!("{}{}", prev.text.trim(), seg.text.trim())
+        // Rule 2: BREAK ON SOFT PUNCTUATION (commas, Chinese punctuation)
+        if ends_with_sentence(prev_text)
+            || prev_text.ends_with(',')
+            || prev_text.ends_with('，')
+            || prev_text.ends_with('、')
+        {
+            result.push(seg);
+            continue;
+        }
+
+        // Rule 3: ONLY MERGE if continuous speech + reasonable duration
+        let merged_duration = seg.end - prev.start;
+        if gap <= MERGE_GAP && merged_duration <= MAX_MERGE_DURATION {
+            let merged_text = if is_cjk_text(prev_text) {
+                format!("{}{}", prev_text, seg.text.trim())
             } else {
-                format!("{} {}", prev.text.trim(), seg.text.trim())
+                format!("{} {}", prev_text, seg.text.trim())
             };
 
-            let merged_duration = seg.end - prev.start;
-            if merged_duration <= MAX_DURATION && merged_text.chars().count() <= MAX_LINE_LEN * MAX_LINES {
-                let last = result.last_mut().unwrap();
-                last.end = seg.end;
-                last.text = merged_text;
-                continue;
-            }
+            let last = result.last_mut().unwrap();
+            last.end = seg.end;
+            last.text = merged_text;
+            continue;
         }
 
         result.push(seg);
@@ -316,79 +321,79 @@ fn split_segment(seg: &Segment, is_cjk: bool) -> Vec<Segment> {
     }
 
     let words: Vec<&str> = if is_cjk {
-        // CJK: Use Jieba dictionary for meaningful phrases
-        // Example: "机器学习" stays as one word, not split to "机" "|" "器" "|" "学" "|" "习"
         JIEBA.cut(text, false)
     } else {
-        // Non-CJK: Use Unicode word boundaries
-        // Example: "temperature" stays whole, won't be split to "tempe|rature"
         text.split_word_bounds().collect()
     };
 
     let total_words = words.len();
     if total_words < 2 {
-        return vec![seg.clone()]; // Can't split single word
+        return vec![seg.clone()];
     }
 
     let mid_word_idx = total_words / 2;
     let mut best_split_idx = mid_word_idx;
+    let mut found_good_split = false;
 
-    // SEMANTIC OPTIMIZATION: Find punctuation marks near midpoint
-    // Prefer to split at commas/semicolons for natural rhythm
-    let mut found_punctuation = false;
+    // Semantic conjunction dictionary (for splitting before meaningful transitions)
+    let conj_vi_en = [
+        "nhưng", "và", "thì", "là", "mà", "bởi", "vì", "nên", "tuy", "tuy nhiên",
+        "mặc dù", "nếu", "để", "but", "because", "and", "so", "however", "although",
+        "if", "then",
+    ];
+    let conj_zh = ["但是", "可是", "因为", "所以", "如果", "那么", "不过", "其实", "然后", "虽然", "而且", "为了"];
 
-    // Search around midpoint for punctuation
+    // Scan from midpoint outward to find best split point
     for offset in 0..=(total_words / 2) {
-        // Check right side
-        let right_idx = mid_word_idx + offset;
-        if right_idx < total_words {
-            let word_str = words[right_idx].trim();
-            if word_str.ends_with(',')
-                || word_str.ends_with(';')
-                || word_str.ends_with('，')
-                || word_str.ends_with('、')
-            {
-                best_split_idx = right_idx + 1;
-                found_punctuation = true;
-                debug!(
-                    "post_process: split at punctuation (right): idx={}, word='{}'",
-                    right_idx, word_str
-                );
-                break;
+        for &idx in &[mid_word_idx + offset, mid_word_idx.saturating_sub(offset)] {
+            if idx > 0 && idx < total_words {
+                let word_str = words[idx].trim().to_lowercase();
+
+                // Priority 1: Split RIGHT AFTER punctuation (commas, semicolons)
+                if idx > 0 {
+                    let prev_word = words[idx - 1].trim();
+                    if prev_word.ends_with(',')
+                        || prev_word.ends_with(';')
+                        || prev_word.ends_with('，')
+                        || prev_word.ends_with('、')
+                    {
+                        best_split_idx = idx;
+                        found_good_split = true;
+                        debug!(
+                            "post_process: split after punctuation at idx={}, word='{}'",
+                            idx, prev_word
+                        );
+                        break;
+                    }
+                }
+
+                // Priority 2: Split RIGHT BEFORE conjunction (semantic transition point)
+                let is_conjunction = if is_cjk {
+                    conj_zh.iter().any(|&c| word_str == c)
+                } else {
+                    conj_vi_en.contains(&word_str.as_str())
+                };
+
+                if is_conjunction {
+                    best_split_idx = idx;
+                    found_good_split = true;
+                    debug!(
+                        "post_process: split before conjunction at idx={}, word='{}'",
+                        idx, word_str
+                    );
+                    break;
+                }
             }
         }
-
-        // Check left side
-        if mid_word_idx >= offset {
-            let left_idx = mid_word_idx - offset;
-            let word_str = words[left_idx].trim();
-            if word_str.ends_with(',')
-                || word_str.ends_with(';')
-                || word_str.ends_with('，')
-                || word_str.ends_with('、')
-            {
-                best_split_idx = left_idx + 1;
-                found_punctuation = true;
-                debug!(
-                    "post_process: split at punctuation (left): idx={}, word='{}'",
-                    left_idx, word_str
-                );
-                break;
-            }
+        if found_good_split {
+            break;
         }
-    }
-
-    if !found_punctuation {
-        debug!(
-            "post_process: no punctuation found, splitting at midpoint word: idx={}",
-            mid_word_idx
-        );
     }
 
     let text1 = words[..best_split_idx].join("");
     let text2 = words[best_split_idx..].join("");
 
-    // Split timestamps proportionally by character count (for accuracy)
+    // Split timestamps proportionally by character count
     let char_count = text.chars().count() as f32;
     let text1_char_count = text1.chars().count() as f32;
 
@@ -401,8 +406,8 @@ fn split_segment(seg: &Segment, is_cjk: bool) -> Vec<Segment> {
     let split_time = seg.start + seg.duration() * ratio;
 
     debug!(
-        "post_process: semantic split '{}' => '{}' | '{}' (ratio: {:.2})",
-        text, text1, text2, ratio
+        "post_process: semantic split (conj={}) '{}' => '{}' | '{}' (ratio: {:.2})",
+        found_good_split, text, text1, text2, ratio
     );
 
     vec![
