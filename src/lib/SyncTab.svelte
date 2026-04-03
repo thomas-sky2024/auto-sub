@@ -25,6 +25,17 @@
     if (waveformContainer && videoPath) {
       initWaveSurfer();
     }
+    
+    // Add Space key handler for play/pause
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && wavesurfer) {
+        e.preventDefault();
+        wavesurfer.playPause();
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   });
 
   onDestroy(() => {

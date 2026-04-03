@@ -6,6 +6,7 @@
   import {
     jobStore, isRunning, isIdle, hasResult, activeTab,
     selectedLanguage, selectedModel, performanceMode,
+    generateSRTContent, generateTXTContent,
   } from "$lib/jobStore";
   import { startPipeline, cancelJob, checkModel, exportFile, downloadMedia, auditEnvironment, type EnvironmentAudit } from "$lib/invoke";
   import SyncTab from "$lib/SyncTab.svelte";
@@ -155,19 +156,33 @@
 
   // ── Export ────────────────────────────────────────────────────────────────────
   async function exportSRT() {
+    // Use synced segments if available, otherwise use current segments
+    const segments = $jobStore.syncedSegments.length > 0 
+      ? $jobStore.syncedSegments 
+      : $jobStore.segments;
+    
+    const content = generateSRTContent(segments);
+    
     const path = await save({
       filters: [{ name: "SRT Subtitle", extensions: ["srt"] }],
       defaultPath: videoName.replace(/\.[^.]+$/, "") + ".srt",
     });
-    if (path) await exportFile(path, $jobStore.srtContent);
+    if (path) await exportFile(path, content);
   }
 
   async function exportTXT() {
+    // Use synced segments if available, otherwise use current segments
+    const segments = $jobStore.syncedSegments.length > 0 
+      ? $jobStore.syncedSegments 
+      : $jobStore.segments;
+    
+    const content = generateTXTContent(segments);
+    
     const path = await save({
       filters: [{ name: "Text", extensions: ["txt"] }],
       defaultPath: videoName.replace(/\.[^.]+$/, "") + ".txt",
     });
-    if (path) await exportFile(path, $jobStore.txtContent);
+    if (path) await exportFile(path, content);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -183,6 +198,14 @@
     const dur = seg.end - seg.start;
     return dur > 0 ? seg.text.length / dur : 0;
   }
+
+  // Reactive SRT content - uses synced segments if available
+  const srtPreviewContent = $derived.by(() => {
+    const segments = $jobStore.syncedSegments.length > 0 
+      ? $jobStore.syncedSegments 
+      : $jobStore.segments;
+    return generateSRTContent(segments);
+  });
 </script>
 
 <!-- ── App Shell ─────────────────────────────────────────────────────────────── -->
@@ -560,7 +583,7 @@
       <!-- SRT Preview -->
       <div class="srt-preview-panel">
         <h3 class="preview-title">SRT Preview</h3>
-        <pre class="srt-preview">{$jobStore.srtContent.slice(0, 2000)}{$jobStore.srtContent.length > 2000 ? "\n…" : ""}</pre>
+        <pre class="srt-preview">{srtPreviewContent.slice(0, 2000)}{srtPreviewContent.length > 2000 ? "\n…" : ""}</pre>
       </div>
     </div>
     {/if}

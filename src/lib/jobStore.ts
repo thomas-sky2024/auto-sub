@@ -98,6 +98,30 @@ export const hasResult = derived(jobStore, ($j) =>
 );
 export const segmentCount = derived(jobStore, ($j) => $j.segments.length);
 
+// Helper function to regenerate SRT content from segments
+export function generateSRTContent(segments: Segment[]): string {
+  if (segments.length === 0) return "";
+  
+  return segments
+    .map((seg, i) => {
+      const formatTime = (secs: number): string => {
+        const h = Math.floor(secs / 3600);
+        const m = Math.floor((secs % 3600) / 60);
+        const s = Math.floor(secs % 60);
+        const ms = Math.round((secs % 1) * 1000);
+        return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
+      };
+      
+      return `${i + 1}\n${formatTime(seg.start)} --> ${formatTime(seg.end)}\n${seg.text}\n`;
+    })
+    .join("\n");
+}
+
+// Helper function to regenerate TXT content from segments
+export function generateTXTContent(segments: Segment[]): string {
+  return segments.map((seg) => seg.text).join("\n");
+}
+
 // ── UI Settings ───────────────────────────────────────────────────────────────
 export const selectedLanguage = writable<string>("auto");
 export const selectedModel = writable<string>("large-v3-turbo");
