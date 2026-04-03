@@ -1,439 +1,453 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import WaveSurfer from "wavesurfer.js";
-  import { jobStore } from "$lib/jobStore";
-  import { applySubtitleSync } from "$lib/invoke";
+  import { convertFileSrc } from "@tauri-apps/api/core";
+  import { jobStore } from "./jobStore";
+  import { applySubtitleSync } from "./invoke";
+  
+  // Props
+  let { videoPath } = $props();
+  // Use segments from jobStore reactively
+  let segments = $derived($jobStore.segments);
 
-  interface Props {
-    videoPath: string | null;
-  }
-  let { videoPath }: Props = $props();
-
-  let waveformContainer = $state<HTMLElement | null>(null);
-  let wavesurfer = $state<WaveSurfer | null>(null);
+  let waveformContainer: HTMLDivElement | undefined = $state(); // Bind with DOM
+  let wavesurfer: WaveSurfer | undefined;
+  let isReady = $state(false);
+  let errorMessage = $state("");
   let currentTime = $state(0);
-  let isPlaying = $state(false);
 
-  // Sync Points State
-  let pointAIndex = $state<number | null>(null);
-  let pointBIndex = $state<number | null>(null);
-  let pointAShift = $state(0);
-  let pointBShift = $state(0);
-  let isApplyingSync = $state(false);
+  let pointA = $state<{ idx: number | null, shift: number }>({ idx: null, shift: 0 });
+  let pointB = $state<{ idx: number | null, shift: number }>({ idx: null, shift: 0 });
 
-  onMount(async () => {
-    if (waveformContainer && videoPath) {
-      initWaveSurfer();
+  function formatTime(secs: number): string {
+    if (isNaN(secs)) return "00:00:00,000";
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = Math.floor(secs % 60);
+    const ms = Math.round((secs % 1) * 1000);
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
+  }
+
+  function getSegmentText(idx: number | null): string {
+    if (idx === null || !segments[idx]) return "";
+    return segments[idx].text;
+  }
+
+  function getSegmentStart(idx: number | null): number {
+    if (idx === null || !segments[idx]) return 0;
+    return segments[idx].start;
+  }
+
+  function findCurrentSegmentIdx() {
+    return segments.findIndex(s => currentTime >= s.start && currentTime <= s.end);
+  }
+
+  function setPointAFromCurrent() {
+    const idx = findCurrentSegmentIdx();
+    if (idx === -1) {
+      // If not exactly on a segment, find the closest one?
+      // For now, just return if not on a segment to avoid confusion
+      return;
     }
     
-    // Add Space key handler for play/pause
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && wavesurfer) {
-        e.preventDefault();
-        wavesurfer.playPause();
-      }
-    };
+    pointA.idx = idx;
+    pointA.shift = Math.round((currentTime - segments[idx].start) * 1000);
+  }
+
+  function setPointBFromCurrent() {
+    const idx = findCurrentSegmentIdx();
+    if (idx === -1 || idx === pointA.idx) return;
     
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  });
-
-  onDestroy(() => {
-    wavesurfer?.destroy();
-  });
-
-  function initWaveSurfer() {
-    if (!waveformContainer || !videoPath) return;
-
-    wavesurfer = WaveSurfer.create({
-      container: waveformContainer,
-      waveColor: "#4f46e5",
-      progressColor: "#818cf8",
-      cursorColor: "#a5b4fc",
-      barWidth: 2,
-      barGap: 1,
-      height: 120,
-      autoCenter: true,
-      normalize: true,
-    });
-
-    // We can load video files directly as audio
-    wavesurfer.load(`https://asset.localhost/${videoPath}`);
-
-    wavesurfer.on("timeupdate", (time) => {
-      currentTime = time;
-    });
-
-    wavesurfer.on("play", () => (isPlaying = true));
-    wavesurfer.on("pause", () => (isPlaying = false));
+    pointB.idx = idx;
+    pointB.shift = Math.round((currentTime - segments[idx].start) * 1000);
   }
 
-  function togglePlay() {
-    wavesurfer?.playPause();
+  function adjustShift(point: 'A' | 'B', amount: number) {
+    if (point === 'A' && pointA.idx !== null) {
+      pointA.shift += amount;
+    } else if (point === 'B' && pointB.idx !== null) {
+      pointB.shift += amount;
+    }
   }
 
-  function seekTo(time: number) {
-    wavesurfer?.setTime(time);
+  function resetPoints() {
+    pointA = { idx: null, shift: 0 };
+    pointB = { idx: null, shift: 0 };
   }
 
   async function applySync() {
-    if (pointAIndex === null || pointBIndex === null) return;
+    if (pointA.idx === null || pointB.idx === null) return;
     
-    isApplyingSync = true;
     try {
       const result = await applySubtitleSync(
-        $jobStore.originalSegments,
-        pointAIndex,
-        pointAShift,
-        pointBIndex,
-        pointBShift
+        $jobStore.segments,
+        pointA.idx,
+        pointA.shift / 1000,
+        pointB.idx,
+        pointB.shift / 1000
       );
       jobStore.setSyncedSegments(result);
-      alert("Synchronization applied successfully!");
-    } catch (e) {
-      alert(`Error applying sync: ${e}`);
-    } finally {
-      isApplyingSync = false;
+    } catch (err) {
+      console.error("Apply sync failed:", err);
     }
   }
 
-  function setPointA(index: number) {
-    pointAIndex = index;
-    seekTo($jobStore.originalSegments[index].start);
-  }
+  onMount(async () => {
+    errorMessage = "";
+    if (!videoPath) {
+      errorMessage = "Không tìm thấy đường dẫn video.";
+      return;
+    }
 
-  function setPointB(index: number) {
-    pointBIndex = index;
-    seekTo($jobStore.originalSegments[index].start);
-  }
+    try {
+      // Guard for Svelte 5 DOM readiness
+      await new Promise(resolve => requestAnimationFrame(resolve));
 
-  function formatTime(secs: number): string {
-    const m = Math.floor(secs / 60);
-    const s = Math.floor(secs % 60);
-    const ms = Math.round((secs % 1) * 1000);
-    return `${m}:${String(s).padStart(2, "0")}.${String(ms).padStart(3, "0")}`;
-  }
+      if (!waveformContainer) {
+        errorMessage = "Lỗi container hiển thị sóng âm.";
+        return;
+      }
+
+      wavesurfer = WaveSurfer.create({
+        container: waveformContainer,
+        waveColor: "#4f46e5",
+        progressColor: "#818cf8",
+        cursorColor: "#ffffff",
+        barWidth: 2,
+        barRadius: 3,
+        height: 120,
+        normalize: true,
+      });
+
+      const assetUrl = convertFileSrc(videoPath);
+      console.log("Loading waveform from:", assetUrl);
+      
+      wavesurfer.load(assetUrl);
+
+      wavesurfer.on("ready", () => {
+        isReady = true;
+        errorMessage = "";
+        console.log("WaveSurfer is ready");
+      });
+
+      wavesurfer.on("error", (e) => {
+        console.error("WaveSurfer error:", e);
+        errorMessage = "Không thể tải sóng âm. Vui lòng kiểm tra định dạng file.";
+        isReady = false;
+      });
+
+      wavesurfer.on("audioprocess", () => {
+        if (wavesurfer) {
+          currentTime = wavesurfer.getCurrentTime();
+        }
+      });
+
+    } catch (err) {
+      console.error("Initialization error:", err);
+      errorMessage = "Có lỗi xảy ra khi khởi tạo.";
+    }
+  });
+
+  onDestroy(() => {
+    if (wavesurfer) {
+      wavesurfer.destroy();
+    }
+  });
 </script>
 
-<div class="sync-tab">
-  <!-- Waveform Header -->
-  <div class="waveform-panel">
-    <div bind:this={waveformContainer} class="waveform-container"></div>
-    <div class="waveform-controls">
-      <button class="play-btn" onclick={togglePlay}>
-        {isPlaying ? "⏸ Pause" : "▶ Play"}
-      </button>
-      <span class="time-display">{formatTime(currentTime)}</span>
-    </div>
+<div class="sync-container">
+  <div class="waveform-panel panel">
+    {#if !isReady}
+      <div class="waveform-loader">
+        {#if errorMessage}
+          <p class="error">{errorMessage}</p>
+        {:else}
+          <div class="spinner"></div>
+          <p>Đang tải sóng âm...</p>
+        {/if}
+      </div>
+    {/if}
+    
+    <div 
+      bind:this={waveformContainer} 
+      class="waveform-container" 
+      class:hidden={!isReady}
+    ></div>
   </div>
 
-  <div class="sync-grid">
-    <!-- Points Control -->
-    <div class="panel points-panel">
-      <h3 class="panel-subtitle">Point Synchronization</h3>
-      
-      <div class="points-row">
-        <!-- Point A -->
-        <div class="point-config {pointAIndex !== null ? 'active' : ''}">
-          <div class="point-header">
-            <span class="point-label">Point A (Start)</span>
-            {#if pointAIndex !== null}
-              <span class="point-ref"># {pointAIndex + 1}</span>
-            {/if}
-          </div>
-          
-          {#if pointAIndex !== null}
-            <div class="point-data">
-              <span class="orig-time">Original: {formatTime($jobStore.originalSegments[pointAIndex].start)}s</span>
-              <div class="shift-control">
-                <label>Shift (sec):</label>
-                <div class="shift-inputs">
-                  <button onclick={() => pointAShift -= 0.1}>-0.1</button>
-                  <input type="number" step="0.1" bind:value={pointAShift} />
-                  <button onclick={() => pointAShift += 0.1}>+0.1</button>
-                </div>
-              </div>
-            </div>
-          {:else}
-            <div class="point-empty">Select a segment below as Point A</div>
-          {/if}
-        </div>
+  <div class="controls-panel panel">
+    <div class="panel-header">
+      <h2>Canh đồng bộ (Sync)</h2>
+      <p class="help-text">Chọn hai điểm (bắt đầu và kết thúc) để kéo giãn hoặc co lại toàn bộ phụ đề.</p>
+    </div>
 
-        <!-- Point B -->
-        <div class="point-config {pointBIndex !== null ? 'active' : ''}">
-          <div class="point-header">
-            <span class="point-label">Point B (End)</span>
-            {#if pointBIndex !== null}
-              <span class="point-ref"># {pointBIndex + 1}</span>
-            {/if}
-          </div>
-          
-          {#if pointBIndex !== null}
-            <div class="point-data">
-              <span class="orig-time">Original: {formatTime($jobStore.originalSegments[pointBIndex].start)}s</span>
-              <div class="shift-control">
-                <label>Shift (sec):</label>
-                <div class="shift-inputs">
-                  <button onclick={() => pointBShift -= 0.1}>-0.1</button>
-                  <input type="number" step="0.1" bind:value={pointBShift} />
-                  <button onclick={() => pointBShift += 0.1}>+0.1</button>
-                </div>
-              </div>
-            </div>
-          {:else}
-            <div class="point-empty">Select a segment below as Point B</div>
-          {/if}
-        </div>
+    <div class="sync-point-group">
+      <div class="point-header">
+        <h3>Bước 1: Chọn điểm đầu</h3>
+        <span class="status-badge" class:set={pointA.idx !== null}>
+          {pointA.idx !== null ? 'Đã chọn' : 'Chưa chọn'}
+        </span>
       </div>
-
-      <button 
-        class="apply-btn" 
-        disabled={pointAIndex === null || pointBIndex === null || isApplyingSync}
-        onclick={applySync}
-      >
-        {isApplyingSync ? "⌛ Processing..." : "⚡ Apply Calibration"}
-      </button>
-
-      <div class="sync-tip">
-        💡 Tip: For best results, select Point A near the beginning and Point B near the end of the video.
+      
+      <div class="point-controls">
+        <p class="instruction-text">Nghe video, tìm dòng sub đầu tiên, sau đó bấm nút:</p>
+        <button class="btn-action set" onclick={setPointAFromCurrent}>
+          Sử dụng thời gian hiện tại ({formatTime(currentTime)}) làm Điểm 1
+        </button>
+        
+        {#if pointA.idx !== null}
+          <div class="point-details">
+            <div class="detail-row">
+              <span>Sub đã chọn:</span>
+              <strong>#{pointA.idx + 1}: "{getSegmentText(pointA.idx)}"</strong>
+            </div>
+            
+            <div class="detail-row shift-input-row">
+              <label for="shiftA">Độ lệch (ms):</label>
+              <div class="shift-numeric-control">
+                <button onclick={() => adjustShift('A', -100)} class="btn-minus">−</button>
+                <input type="number" id="shiftA" bind:value={pointA.shift} step="10" />
+                <button onclick={() => adjustShift('A', 100)} class="btn-plus">+</button>
+              </div>
+            </div>
+            <p class="summary">Sub gốc: {formatTime(getSegmentStart(pointA.idx))} → Sub mới: {formatTime(getSegmentStart(pointA.idx) + pointA.shift/1000)}</p>
+          </div>
+        {/if}
       </div>
     </div>
 
-    <!-- Segment List -->
-    <div class="panel segments-panel">
-      <h3 class="panel-subtitle">Select Reference Segments</h3>
-      <div class="list-container">
-        <table class="sync-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Time</th>
-              <th>Text</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each $jobStore.originalSegments as seg, i}
-              <tr class="sync-row" class:is-a={pointAIndex === i} class:is-b={pointBIndex === i}>
-                <td>{i + 1}</td>
-                <td class="mono">{formatTime(seg.start)}</td>
-                <td class="text-truncate">{seg.text}</td>
-                <td class="actions">
-                  <button class="btn-set a" onclick={() => setPointA(i)}>Set A</button>
-                  <button class="btn-set b" onclick={() => setPointB(i)}>Set B</button>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+    <div class="divider"></div>
+
+    <div class="sync-point-group" class:disabled={pointA.idx === null}>
+      <div class="point-header">
+        <h3>Bước 2: Chọn điểm cuối</h3>
+        <span class="status-badge" class:set={pointB.idx !== null}>
+          {pointB.idx !== null ? 'Đã chọn' : 'Chưa chọn'}
+        </span>
       </div>
+
+      <div class="point-controls">
+        <p class="instruction-text">Nghe video, tìm dòng sub cuối cùng, sau đó bấm nút:</p>
+        <button 
+          class="btn-action set" 
+          onclick={setPointBFromCurrent}
+          disabled={pointA.idx === null}
+        >
+          Sử dụng thời gian hiện tại ({formatTime(currentTime)}) làm Điểm 2
+        </button>
+
+        {#if pointB.idx !== null}
+          <div class="point-details">
+            <div class="detail-row">
+              <span>Sub đã chọn:</span>
+              <strong>#{pointB.idx + 1}: "{getSegmentText(pointB.idx)}"</strong>
+            </div>
+            
+            <div class="detail-row shift-input-row">
+              <label for="shiftB">Độ lệch (ms):</label>
+              <div class="shift-numeric-control">
+                <button onclick={() => adjustShift('B', -100)} class="btn-minus">−</button>
+                <input type="number" id="shiftB" bind:value={pointB.shift} step="10" />
+                <button onclick={() => adjustShift('B', 100)} class="btn-plus">+</button>
+              </div>
+            </div>
+            <p class="summary">Sub gốc: {formatTime(getSegmentStart(pointB.idx))} → Sub mới: {formatTime(getSegmentStart(pointB.idx) + pointB.shift/1000)}</p>
+          </div>
+        {/if}
+      </div>
+    </div>
+
+    <div class="final-actions">
+      <button 
+        class="btn-primary" 
+        onclick={applySync} 
+        disabled={!isReady || pointA.idx === null || pointB.idx === null}
+      >
+        Áp dụng Đồng bộ
+      </button>
+      <button class="btn-secondary" onclick={resetPoints}>Xóa các điểm</button>
     </div>
   </div>
 </div>
 
 <style>
-  .sync-tab {
-    display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-    height: calc(100vh - 56px - 3rem);
-    animation: fadeIn 0.3s ease;
+  /* Container tổng thể */
+  .sync-container {
+    display: grid;
+    grid-template-columns: 1fr 380px; /* Panel phải hẹp hơn */
+    gap: 1rem;
+    padding: 1rem;
+    height: 100%;
+    color: #e5e7eb;
+    font-family: system-ui, -apple-system, sans-serif;
   }
 
-  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .panel {
+    background: #1f2937; /* slate-800 */
+    border-radius: 0.75rem;
+    border: 1px solid #374151;
+    display: flex;
+    flex-direction: column;
+  }
 
+  /* PANEL TRÁI (WAVEFORM) */
   .waveform-panel {
-    background: #13141c;
-    border: 1px solid #2a2d3e;
-    border-radius: 12px;
-    padding: 1rem;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  .waveform-container {
+    width: 100%;
+    height: 120px;
+    padding: 0 10px;
+  }
+
+  .waveform-container.hidden { display: none; }
+
+  .waveform-loader {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    color: #9ca3af;
+  }
+
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid #374151;
+    border-top-color: #4f46e5;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  .error { color: #f87171; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* PANEL PHẢI (CONTROLS) */
+  .controls-panel {
+    padding: 1.25rem;
+    gap: 1rem;
+  }
+
+  .panel-header {
+    margin-bottom: 0.5rem;
+  }
+
+  h2 { font-size: 1.25rem; font-weight: 600; color: #f3f4f6; margin: 0; }
+  h3 { font-size: 1rem; font-weight: 600; color: #f3f4f6; margin: 0; }
+  
+  .help-text, .instruction-text {
+    font-size: 0.875rem; color: #9ca3af; margin: 0.25rem 0 0;
+  }
+
+  /* SYNC POINT GROUPS */
+  .sync-point-group {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
   }
 
-  .waveform-container {
-    background: #0e0f14;
-    border-radius: 8px;
-    overflow: hidden;
-  }
-
-  .waveform-controls {
-    display: flex;
-    align-items: center;
-    gap: 1.5rem;
-  }
-
-  .play-btn {
-    background: #252840;
-    color: #a5b4fc;
-    border: 1px solid #3a3e5c;
-    padding: 0.4rem 1rem;
-    border-radius: 6px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .play-btn:hover { background: #2d3254; }
-
-  .time-display {
-    font-family: monospace;
-    font-size: 1.1rem;
-    color: #a5b4fc;
-    font-weight: 700;
-  }
-
-  .sync-grid {
-    display: grid;
-    grid-template-columns: 380px 1fr;
-    gap: 1.5rem;
-    flex: 1;
-    overflow: hidden;
-  }
-
-  .panel {
-    background: #13141c;
-    border: 1px solid #2a2d3e;
-    border-radius: 12px;
-    padding: 1.25rem;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .panel-subtitle {
-    font-size: 0.8rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #5b6080;
-    margin-bottom: 1.25rem;
-  }
-
-  .points-row {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-
-  .point-config {
-    background: #1a1b28;
-    border: 1px solid #2a2d3e;
-    border-radius: 10px;
-    padding: 1rem;
-    transition: all 0.2s;
-  }
-  .point-config.active { border-color: #4f46e5; background: #13152a; }
-  .point-config.active.is-b { border-color: #ef4444; }
+  .sync-point-group.disabled { opacity: 0.4; pointer-events: none; }
 
   .point-header {
     display: flex;
     justify-content: space-between;
-    margin-bottom: 0.75rem;
+    align-items: center;
   }
-  .point-label { font-weight: 700; font-size: 0.9rem; color: #8b92b8; }
-  .point-ref { background: #4f46e5; color: white; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; }
 
-  .point-empty { font-size: 0.85rem; color: #4b5563; font-style: italic; }
+  .status-badge {
+    font-size: 0.75rem; padding: 2px 8px; border-radius: 99px;
+    background: #374151; color: #9ca3af;
+  }
+  .status-badge.set {
+    background: #064e3b; color: #a7f3d0;
+  }
 
-  .orig-time { display: block; font-size: 0.8rem; color: #6b7280; margin-bottom: 0.75rem; }
-
-  .shift-control {
+  .point-controls {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
   }
-  .shift-control label { font-size: 0.75rem; color: #9ca3af; }
 
-  .shift-inputs {
-    display: flex;
-    gap: 0.25rem;
-  }
-  .shift-inputs button {
-    background: #252840;
-    border: 1px solid #3a3e5c;
-    color: white;
-    width: 32px;
-    height: 32px;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .shift-inputs input {
-    flex: 1;
-    background: #0e0f14;
-    border: 1px solid #2a2d3e;
-    color: white;
-    text-align: center;
-    border-radius: 4px;
-    outline: none;
-  }
-
-  .apply-btn {
-    background: linear-gradient(135deg, #4f46e5, #7c3aed);
-    color: white;
-    border: none;
+  .point-details {
+    background: #111827; /* slate-950 */
     padding: 0.75rem;
-    border-radius: 8px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: transform 0.2s;
-  }
-  .apply-btn:hover:not(:disabled) { transform: translateY(-1px); }
-  .apply-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .sync-tip {
-    margin-top: 1rem;
-    font-size: 0.75rem;
-    color: #6b7280;
-    line-height: 1.4;
+    border-radius: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    border: 1px solid #1f2937;
   }
 
-  .list-container {
-    flex: 1;
-    overflow-y: auto;
-    border-radius: 8px;
-    border: 1px solid #2a2d3e;
+  .detail-row {
+    font-size: 0.875rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
 
-  .sync-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-  }
-  .sync-table th {
-    text-align: left;
-    padding: 0.6rem 0.75rem;
-    background: #1a1b28;
-    color: #5b6080;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    position: sticky;
-    top: 0;
-  }
-  .sync-row { border-bottom: 1px solid #1e2030; }
-  .sync-row:hover { background: #17182a; }
-  .sync-row.is-a { background: #1e1b4b; }
-  .sync-row.is-b { background: #450a0a22; border-left: 3px solid #ef4444; }
-  .sync-row.is-a { border-left: 3px solid #4f46e5; }
+  .detail-row strong { color: #e5e7eb; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
+  
+  /* SHIFT NUMERIC CONTROL */
+  .shift-input-row { margin-top: 2px; }
 
-  .sync-row td { padding: 0.5rem 0.75rem; }
-  .mono { font-family: monospace; color: #8b92b8; }
-  .text-truncate {
-    max-width: 300px;
+  .shift-numeric-control {
+    display: flex;
+    align-items: center;
+    border-radius: 6px;
+    background: #1f2937;
+    border: 1px solid #374151;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: #c4c8e2;
   }
 
-  .actions { display: flex; gap: 0.4rem; }
-  .btn-set {
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.7rem;
-    font-weight: 700;
-    cursor: pointer;
-    border: 1px solid transparent;
+  .shift-numeric-control button {
+    background: none; border: none; color: #9ca3af;
+    padding: 0 10px; height: 32px; font-size: 1.25rem; cursor: pointer;
   }
-  .btn-set.a { background: #1e1b4b; color: #a5b4fc; border-color: #4f46e5; }
-  .btn-set.b { background: #450a0a; color: #fca5a5; border-color: #991b1b; }
+  .shift-numeric-control button:hover { background: #374151; color: #f3f4f6; }
+
+  .shift-numeric-control input {
+    background: #111827; border: none; color: #e5e7eb;
+    width: 70px; height: 32px; text-align: center;
+    border-left: 1px solid #374151; border-right: 1px solid #374151;
+  }
+
+  .summary { font-size: 0.75rem; color: #a1a1aa; font-style: italic; margin: 0; }
+  .divider { height: 1px; background: #374151; margin: 0.25rem 0; }
+
+  /* BUTTONS */
+  button {
+    font-size: 0.875rem; font-weight: 500;
+    transition: all 150ms ease;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-action.set {
+    background: #111827; border: 1px dashed #4f46e5; color: #818cf8;
+    padding: 0.5rem 1rem; border-radius: 6px; text-align: center;
+  }
+  .btn-action.set:not(:disabled):hover { background: #1e1b4b; border-color: #818cf8; }
+
+  .final-actions {
+    margin-top: auto; /* Đẩy xuống đáy panel */
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding-top: 1rem;
+  }
+
+  .btn-primary {
+    background: #4f46e5; color: #ffffff; border: none;
+    padding: 0.75rem; border-radius: 8px; font-weight: 600;
+  }
+  .btn-primary:not(:disabled):hover { background: #4338ca; }
+
+  .btn-secondary {
+    background: transparent; color: #9ca3af; border: none;
+    padding: 0.5rem; text-decoration: underline;
+  }
+  .btn-secondary:hover { color: #f3f4f6; }
 </style>

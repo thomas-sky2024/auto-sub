@@ -10,8 +10,14 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "fs:default",
-    "fs:allow-read",
-    "fs:allow-write",
+    {
+      "identifier": "fs:allow-read",
+      "scope": ["**"]
+    },
+    {
+      "identifier": "fs:allow-write",
+      "scope": ["**"]
+    },
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
     "fs:allow-exists",
