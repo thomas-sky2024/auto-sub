@@ -303,11 +303,6 @@
     <!-- ── TAB 1: TRANSCRIBE ──────────────────────────────────────────────── -->
     {#if $activeTab === "transcribe"}
     <div class="transcribe-layout">
-    {/if}
-    
-    {#if $activeTab === "sync"}
-      <SyncTab {videoPath} />
-    {/if}
 
       <!-- Left: File + Settings -->
       <div class="panel settings-panel">
@@ -515,6 +510,10 @@
         {/if}
       </div>
     </div>
+    {/if}
+
+    {#if $activeTab === "sync"}
+      <SyncTab {videoPath} />
     {/if}
 
     <!-- ── TAB 2: REVIEW & EXPORT ─────────────────────────────────────────── -->
