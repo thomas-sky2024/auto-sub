@@ -70,3 +70,18 @@ export interface EnvironmentAudit {
 
 export const auditEnvironment = (): Promise<EnvironmentAudit> =>
   invoke("audit_environment");
+
+export const applySubtitleSync = (
+  segments: Segment[],
+  startIdx: number,
+  shiftStartSec: number,
+  endIdx: number,
+  shiftEndSec: number
+): Promise<Segment[]> =>
+  invoke("apply_subtitle_sync", {
+    segments,
+    startIdx,
+    shiftStartSec,
+    endIdx,
+    shiftEndSec,
+  });

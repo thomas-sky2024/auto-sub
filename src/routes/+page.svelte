@@ -8,6 +8,7 @@
     selectedLanguage, selectedModel, performanceMode,
   } from "$lib/jobStore";
   import { startPipeline, cancelJob, checkModel, exportFile, downloadMedia, auditEnvironment, type EnvironmentAudit } from "$lib/invoke";
+  import SyncTab from "$lib/SyncTab.svelte";
 
   // ── State ────────────────────────────────────────────────────────────────────
   let videoPath = $state<string | null>(null);
@@ -258,10 +259,16 @@
           class="tab {$activeTab === 'review' ? 'active' : ''} {!$hasResult ? 'disabled' : ''}"
           onclick={() => $hasResult && ($activeTab = "review")}
         >
-          Review & Export
+          Review
           {#if $jobStore.segments.length > 0}
             <span class="badge">{$jobStore.segments.length}</span>
           {/if}
+        </button>
+        <button
+          class="tab {$activeTab === 'sync' ? 'active' : ''} {!$hasResult ? 'disabled' : ''}"
+          onclick={() => $hasResult && ($activeTab = "sync")}
+        >
+          Sync
         </button>
       </nav>
     </div>
@@ -273,6 +280,11 @@
     <!-- ── TAB 1: TRANSCRIBE ──────────────────────────────────────────────── -->
     {#if $activeTab === "transcribe"}
     <div class="transcribe-layout">
+    {/if}
+    
+    {#if $activeTab === "sync"}
+      <SyncTab {videoPath} />
+    {/if}
 
       <!-- Left: File + Settings -->
       <div class="panel settings-panel">
@@ -520,7 +532,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each $jobStore.segments as seg, i}
+            {#each $jobStore.syncedSegments.length > 0 ? $jobStore.syncedSegments : $jobStore.segments as seg, i}
               {@const segCps = cps(seg)}
               <tr class="seg-row {segCps > 20 ? 'cps-warn' : ''}">
                 <td class="col-idx">{i + 1}</td>
