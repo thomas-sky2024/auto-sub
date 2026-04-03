@@ -117,6 +117,12 @@ async fn export_file(
     })
 }
 
+/// Clear all cached data.
+#[tauri::command]
+async fn clear_cache() -> Result<(), error::AutoSubError> {
+    cache::clear_all_cache()
+}
+
 // ── App Entry Point ───────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -141,6 +147,7 @@ pub fn run() {
             audit_environment,
             export_file,
             apply_subtitle_sync,
+            clear_cache,
             downloader::download_media,
         ])
         .run(tauri::generate_context!())

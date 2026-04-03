@@ -3,6 +3,7 @@ use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::fs;
 
 const PIPELINE_VERSION: &str = "v5";
 const WHISPER_VERSION: &str = "1.8.4";
@@ -163,4 +164,17 @@ fn compute_file_hash(path: &str) -> Result<String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Clear all cached data.
+pub fn clear_all_cache() -> Result<()> {
+    let base = dirs::home_dir()
+        .ok_or_else(|| AutoSubError::Cache("Cannot determine home directory".into()))?;
+    let cache_root = base.join(".autosub").join("cache");
+    if cache_root.exists() {
+        fs::remove_dir_all(&cache_root)
+            .map_err(|e| AutoSubError::Cache(format!("Failed to clear cache: {}", e)))?;
+        info!("All cache cleared");
+    }
+    Ok(())
 }
