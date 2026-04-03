@@ -41,3 +41,8 @@ src-tauri/gen
 # OS
 .DS_Store
 Thumbs.db
+
+# Build and feedback
+build/
+feedback/
+src-tauri/bin/

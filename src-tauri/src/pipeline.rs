@@ -1,6 +1,6 @@
 use crate::{
-    cache, error::{AutoSubError, Result},
-    ffmpeg, job_manager::JobManager, model_manager::ModelManager, post_process, subtitle, 
+    cache, demucs, error::{AutoSubError, Result},
+    ffmpeg, job_manager::JobManager, model_manager::ModelManager, post_process, subtitle,
     thermal, validator, whisper,
 };
 use tauri_plugin_shell::ShellExt;
@@ -25,6 +25,8 @@ pub struct PipelineOptions {
     pub language: String,
     pub model: String,
     pub performance_mode: thermal::PerformanceMode,
+    #[serde(default)]
+    pub isolate_vocals: bool,
 }
 
 /// Output of a completed pipeline run.
@@ -152,6 +154,37 @@ pub async fn run(
 
     cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Extracted)?;
 
+    // ── STAGE 1.5: Vocal Separation (Demucs) ──────────────────────────────────
+    let mut final_audio_for_whisper = audio_path.clone();
+
+    if opts.isolate_vocals {
+        emit_progress(&app, "Separating vocals", 20.0, 0);
+        job_mgr.update_progress("Separating vocals", 20.0);
+        cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Processing)?;
+
+        let demucs_sidecar = app.shell().sidecar("demucs-main").map_err(|e|
+            AutoSubError::SidecarNotFound(format!("demucs-main sidecar not found: {}", e))
+        )?;
+
+        let demucs_model_path = ModelManager::get_demucs_model_path().to_string_lossy().to_string();
+
+        match demucs::separate_vocals(
+            demucs_sidecar,
+            &audio_path,
+            &cache_dir.to_string_lossy().to_string(),
+            &demucs_model_path,
+        ).await {
+            Ok(vocals_path) => {
+                info!("pipeline: vocals separated successfully, using {}", vocals_path);
+                final_audio_for_whisper = vocals_path;
+            }
+            Err(e) => {
+                warn!("pipeline: vocal separation failed ({}), continuing with original audio", e);
+                // Fall back to original audio if demucs fails
+            }
+        }
+    }
+
     emit_progress(&app, "Transcribing", 35.0, 0);
     job_mgr.update_progress("Transcribing", 35.0);
     cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Transcribing)?;
@@ -185,7 +218,7 @@ pub async fn run(
         whisper::transcribe(
             sidecar,
             &model_path,
-            &audio_path,
+            &final_audio_for_whisper,
             &output_dir,
             lang,
             threads,
@@ -209,7 +242,7 @@ pub async fn run(
                 whisper::transcribe(
                     sidecar,
                     &small_model_path,
-                    &audio_path,
+                    &final_audio_for_whisper,
                     &output_dir,
                     lang,
                     threads,

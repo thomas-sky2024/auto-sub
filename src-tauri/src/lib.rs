@@ -1,4 +1,5 @@
 mod cache;
+mod demucs;
 mod downloader;
 mod error;
 mod ffmpeg;
@@ -7,6 +8,7 @@ mod pipeline;
 mod model_manager;
 mod post_process;
 mod subtitle;
+mod subtitle_sync;
 mod thermal;
 mod utils;
 mod validator;
@@ -89,6 +91,21 @@ async fn audit_environment(app: AppHandle) -> Result<EnvironmentAudit, error::Au
     })
 }
 
+/// Apply point-based subtitle synchronization.
+///
+/// Uses two reference points to calculate a linear time transformation
+/// that is applied to all subtitle segments.
+#[tauri::command]
+async fn apply_subtitle_sync(
+    segments: Vec<subtitle::Segment>,
+    start_idx: usize,
+    shift_start_sec: f32,
+    end_idx: usize,
+    shift_end_sec: f32,
+) -> Result<Vec<subtitle::Segment>, error::AutoSubError> {
+    subtitle_sync::apply_point_sync(segments, start_idx, shift_start_sec, end_idx, shift_end_sec)
+}
+
 /// Export SRT content to a file.
 #[tauri::command]
 async fn export_file(
@@ -123,6 +140,7 @@ pub fn run() {
             list_models,
             audit_environment,
             export_file,
+            apply_subtitle_sync,
             downloader::download_media,
         ])
         .run(tauri::generate_context!())

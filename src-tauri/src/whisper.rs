@@ -1,4 +1,5 @@
 use crate::error::{AutoSubError, Result};
+use crate::model_manager::ModelManager;
 use crate::subtitle::Segment;
 use log::{info, warn};
 use serde::Deserialize;
@@ -31,14 +32,20 @@ struct WhisperTimestamps {
 }
 
 /// Parse whisper timestamp "HH:MM:SS.mmm" into seconds.
+/// Parse whisper timestamp "HH:MM:SS.mmm" or "HH:MM:SS,mmm" into seconds.
 fn parse_timestamp(ts: &str) -> f32 {
-    let parts: Vec<&str> = ts.split(':').collect();
+    // Chuyển dấu phẩy thành dấu chấm để hàm f32::parse() hoạt động đúng
+    let normalized = ts.replace(',', ".");
+    let parts: Vec<&str> = normalized.split(':').collect();
+    
     if parts.len() != 3 {
         return 0.0;
     }
+    
     let h: f32 = parts[0].parse().unwrap_or(0.0);
     let m: f32 = parts[1].parse().unwrap_or(0.0);
     let s: f32 = parts[2].parse().unwrap_or(0.0);
+    
     h * 3600.0 + m * 60.0 + s
 }
 
@@ -123,11 +130,19 @@ async fn run_whisper(
         "--temperature".to_string(),
         "0".to_string(),
         "--print-progress".to_string(),
-        // NOTE: --vad flag is intentionally omitted.
-        // It requires a separate silero VAD model file (--vad-model path).
-        // Passing --vad without a model path causes whisper to crash with
-        // "failed to open VAD model ''" and a Metal GGML_ASSERT abort.
     ];
+
+    // Enable Silero VAD for voice activity detection (filters silence = faster processing)
+    if ModelManager::vad_model_ready() {
+        let vad_path = ModelManager::get_vad_model_path();
+        args.extend([
+            "--vad".to_string(),
+            vad_path.to_string_lossy().to_string(),
+        ]);
+        info!("whisper: Silero VAD enabled for silence filtering");
+    } else {
+        warn!("whisper: Silero VAD model not found, processing without VAD. Download it with setup-models.sh for faster transcription.");
+    }
 
     // Add language flag
     if language == "auto" || language.is_empty() {

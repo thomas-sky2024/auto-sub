@@ -181,4 +181,54 @@ impl ModelManager {
         let models_dir = Self::models_directory();
         models_dir.to_string_lossy().to_string()
     }
+
+    /// Returns the path to the Demucs model for vocal separation.
+    pub fn get_demucs_model_path() -> PathBuf {
+        let models_dir = Self::models_directory();
+
+        // Try common demucs model names
+        let variants = vec![
+            "ggml-model-htdemucs-4s-f16.bin",
+            "ggml-model-htdemucs-4s.bin",
+            "ggml-htdemucs-4s.bin",
+            "ggml-demucs.bin",
+            "demucs.bin",
+        ];
+
+        for variant in variants {
+            let path = models_dir.join(variant);
+            if path.exists() {
+                debug!("model_manager: found demucs model: {:?}", path);
+                return path;
+            }
+        }
+
+        // Default fallback
+        debug!("model_manager: no demucs model found, returning default");
+        models_dir.join("ggml-model-htdemucs-4s-f16.bin")
+    }
+
+    /// Verifies if Demucs model exists and is valid.
+    #[allow(dead_code)]
+    pub fn demucs_model_ready() -> bool {
+        let path = Self::get_demucs_model_path();
+        debug!("model_manager: checking demucs model: {:?}", path);
+
+        if let Ok(metadata) = fs::metadata(&path) {
+            let size_mb = metadata.len() / (1024 * 1024);
+            let is_valid = metadata.len() > 50 * 1024 * 1024; // Demucs models are typically 80MB+
+
+            if is_valid {
+                debug!("model_manager: demucs model valid ({}MB)", size_mb);
+            } else {
+                warn!("model_manager: demucs model too small ({} bytes, expected >50MB)", metadata.len());
+            }
+
+            return is_valid;
+        } else {
+            debug!("model_manager: demucs model not found at {:?}", path);
+        }
+
+        false
+    }
 }

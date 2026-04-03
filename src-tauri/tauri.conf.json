@@ -38,7 +38,8 @@
     "externalBin": [
       "binaries/whisper-main",
       "binaries/ffmpeg",
-      "binaries/yt-dlp"
+      "binaries/yt-dlp",
+      "binaries/demucs-main"
     ],
     "macOS": {
       "frameworks": [],

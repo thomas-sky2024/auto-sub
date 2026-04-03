@@ -13,12 +13,7 @@ lazy_static! {
 const MAX_CPS: f32 = 20.0;
 /// Minimum segment duration in seconds.
 const MIN_DURATION: f32 = 1.2;
-/// Maximum segment duration in seconds.
-const MAX_DURATION: f32 = 8.0;
-/// Maximum characters per line (SRT standard).
-const MAX_LINE_LEN: usize = 42;
-/// Maximum lines per subtitle.
-const MAX_LINES: usize = 2;
+
 /// Merge gap threshold in seconds (respect speaker rhythm).
 const MERGE_GAP: f32 = 0.2;
 /// Maximum duration when merging segments.
