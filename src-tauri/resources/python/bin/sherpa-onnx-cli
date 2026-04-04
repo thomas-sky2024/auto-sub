@@ -1,0 +1,6 @@
+#!/Users/tt/Documents/vibe-coding/auto-sub/src-tauri/resources/python/bin/python3
+import sys
+from sherpa_onnx.cli import cli
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(cli())

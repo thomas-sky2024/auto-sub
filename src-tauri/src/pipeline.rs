@@ -155,11 +155,11 @@ pub async fn run(
 
     // ── Stage 2: SenseVoice transcription ─────────────────────────────────────
     let threads = thermal::recommended_threads(opts.performance_mode);
-    let output_dir = cache_dir.to_string_lossy().to_string();
+    let _output_dir = cache_dir.to_string_lossy().to_string();
 
     // Run sensevoice with retry
     let raw_segments = crate::utils::retry(|| async {
-        let (tx, mut rx) = mpsc::channel::<sensevoice::SenseVoiceProgress>(32);
+        let (tx, mut rx) = mpsc::channel::<sensevoice::TranscribeProgress>(32);
         let app_clone = app.clone();
         let jm_clone = job_mgr.clone();
         tokio::spawn(async move {
@@ -170,8 +170,8 @@ pub async fn run(
             }
         });
 
-        let sidecar = app.shell().sidecar("sherpa-onnx").map_err(|e| 
-            AutoSubError::SidecarNotFound(format!("sherpa-onnx sidecar not found: {}", e))
+        let sidecar = app.shell().sidecar("sherpa-onnx-vad").map_err(|e| 
+            AutoSubError::SidecarNotFound(format!("sherpa-onnx-vad sidecar not found: {}", e))
         )?;
 
         info!(
@@ -179,6 +179,7 @@ pub async fn run(
         );
 
         sensevoice::transcribe(
+            &app,
             sidecar,
             &model_config,
             &ModelManager::vad_model_path().to_string_lossy(),
@@ -201,21 +202,21 @@ pub async fn run(
     job_mgr.update_progress("Post-processing", 85.0);
 
     // ── Stage 4: Post-processing ──────────────────────────────────────────────
-    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Processing)?;
+    cache::update_state(video_path, model_id, lang, duration_secs, cache::PipelineState::Processing)?;
     let processed = post_process::process(validated);
 
-    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Processed)?;
+    cache::update_state(video_path, model_id, lang, duration_secs, cache::PipelineState::Processed)?;
 
     emit_progress(&app, "Exporting", 95.0, processed.len());
     job_mgr.update_progress("Exporting", 95.0);
-    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Exporting)?;
+    cache::update_state(video_path, model_id, lang, duration_secs, cache::PipelineState::Exporting)?;
 
     // ── Stage 5: Export ───────────────────────────────────────────────────────
     let srt_content = subtitle::to_srt(&processed);
     let txt_content = subtitle::to_txt(&processed);
 
     // Save to cache
-    cache::save_final(video_path, &srt_content, model_name, lang, duration_secs)?;
+    cache::save_final(video_path, &srt_content, model_id, lang, duration_secs)?;
 
     emit_progress(&app, "Done", 100.0, processed.len());
     job_mgr.complete();

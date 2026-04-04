@@ -86,7 +86,7 @@ pub struct EnvironmentAudit {
 #[tauri::command]
 async fn audit_environment(app: AppHandle) -> Result<EnvironmentAudit, error::AutoSubError> {
     let ffmpeg_ok = app.shell().sidecar("ffmpeg").is_ok();
-    let sherpa_ok = app.shell().sidecar("sherpa-onnx").is_ok();
+    let sherpa_ok = app.shell().sidecar("sherpa-onnx-vad").is_ok();
     let ytdlp_ok = app.shell().sidecar("yt-dlp").is_ok();
     let vad_ok = model_manager::ModelManager::vad_ready();
     let ready = model_manager::ModelManager::list_ready_ids();

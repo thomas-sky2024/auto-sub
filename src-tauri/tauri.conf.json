@@ -36,11 +36,16 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "binaries/sherpa-onnx",
+      "binaries/sherpa-onnx-offline",
+      "binaries/sherpa-onnx-vad",
       "binaries/ffmpeg",
       "binaries/ffprobe",
       "binaries/yt-dlp"
     ],
+    "resources": {
+      "../scripts/generate-subtitles.py": "scripts/generate-subtitles.py",
+      "resources/python/**/*": "resources/python"
+    },
     "macOS": {
       "frameworks": [],
       "minimumSystemVersion": "10.15",

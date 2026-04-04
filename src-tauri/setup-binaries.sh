@@ -30,9 +30,9 @@ fi
 chmod +x "$BIN_DIR/yt-dlp-aarch64-apple-darwin"
 chmod +x "$BIN_DIR/yt-dlp-x86_64-apple-darwin"
 
-# Ensure whisper-main exists (built via build-whisper.sh)
-if [ ! -f "$BIN_DIR/whisper-main-aarch64-apple-darwin" ]; then
-    echo "WARNING: whisper-main binary missing. Please run build-scripts/build-whisper.sh"
+# Ensure sherpa-onnx (vad) exists (built via build-sensevoice.sh)
+if [ ! -f "$BIN_DIR/sherpa-onnx-vad-aarch64-apple-darwin" ] && [ ! -f "$BIN_DIR/sherpa-onnx-vad-x86_64-apple-darwin" ]; then
+    echo "WARNING: sherpa-onnx-vad binary missing. Please run build-scripts/build-sensevoice.sh"
 fi
 
 echo "Sidecar binaries setup complete."

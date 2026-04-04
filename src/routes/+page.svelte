@@ -277,7 +277,6 @@
             <span class="badge">{$jobStore.segments.length}</span>
           {/if}
         </button>
-        </button>
       </nav>
     </div>
   </header>
@@ -422,12 +421,12 @@
         <div class="progress-container">
           <div class="progress-header">
             <span class="progress-stage">
-              {$jobStore.status === 'downloading' ? 'Downloading Media...' : ($jobStore.stage || "Ready")}
+              {$jobStore.stage === 'Downloading' ? 'Downloading Media...' : ($jobStore.stage || "Ready")}
             </span>
             <span class="progress-pct">{Math.round($jobStore.percent)}%</span>
           </div>
           
-          {#if $jobStore.status === 'downloading'}
+          {#if $jobStore.stage === 'Downloading'}
             <div class="download-meta">
               <span class="dl-speed">🚀 {$jobStore.downloadSpeed}</span>
               <span class="dl-eta">⏳ {$jobStore.downloadEta}</span>
@@ -445,7 +444,7 @@
           <div class="stage-dots">
             {#each ["Downloading", "Extracting", "Transcribing", "Done"] as stageName, i}
               {@const isActive = 
-                (stageName === "Downloading" && $jobStore.status === "downloading") ||
+                (stageName === "Downloading" && $jobStore.stage === "Downloading") ||
                 (stageName === "Extracting" && $jobStore.stage?.includes("Extracting")) ||
                 (stageName === "Transcribing" && $jobStore.stage?.includes("Transcribing")) ||
                 (stageName === "Done" && $jobStore.status === "completed")

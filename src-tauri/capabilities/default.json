@@ -26,7 +26,12 @@
     {
       "identifier": "shell:allow-execute",
       "args": true,
-      "name": "binaries/sherpa-onnx"
+      "name": "binaries/sherpa-onnx-vad"
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "args": true,
+      "name": "binaries/sherpa-onnx-offline"
     },
     {
       "identifier": "shell:allow-execute",

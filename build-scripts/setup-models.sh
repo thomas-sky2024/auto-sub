@@ -43,7 +43,13 @@ download_model() {
 
     echo "📦 Đang giải nén..."
     mkdir -p "$dest_path"
-    tar -xjf "$tmp_file" -C "$TMPDIR_BASE"
+    case "$tarball" in
+        *.tar.bz2) tar -xjf "$tmp_file" -C "$TMPDIR_BASE" ;;
+        *.tar.gz)  tar -xzf "$tmp_file" -C "$TMPDIR_BASE" ;;
+        *.zip)     unzip -q "$tmp_file" -d "$TMPDIR_BASE" ;;
+        *.onnx)    cp "$tmp_file" "$dest_path/" && return 0 ;;
+        *)         echo "❓ Unrecognized format: $tarball" && return 1 ;;
+    esac
 
     # Tìm thư mục được giải nén (khác với tmp_file)
     local extracted_dir
