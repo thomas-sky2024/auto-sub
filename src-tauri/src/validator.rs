@@ -50,6 +50,9 @@ pub fn validate(segments: Vec<Segment>) -> Vec<Segment> {
         }
     }
 
+    // Remove any zero-duration segments created by overlap fixing
+    result.retain(|seg| seg.duration() > 0.001);
+
     result
 }
 

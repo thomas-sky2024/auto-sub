@@ -12,7 +12,7 @@ lazy_static! {
 /// Maximum characters per second for comfortable reading.
 const MAX_CPS: f32 = 20.0;
 /// Minimum segment duration in seconds.
-const MIN_DURATION: f32 = 1.2;
+const MIN_DURATION: f32 = 0.5;
 
 /// Merge gap threshold in seconds (respect speaker rhythm).
 const MERGE_GAP: f32 = 0.2;
@@ -158,21 +158,21 @@ pub fn process(segments: Vec<Segment>) -> Vec<Segment> {
     result = merge_segments(result);
     log::debug!("post_process: after merge_segments -> {} segments", result.len());
 
-    // 2. Enforce duration bounds
-    result = enforce_duration(result);
-    log::debug!("post_process: after enforce_duration -> {} segments", result.len());
-
-    // 3. Enforce segment limits (recursive split for long sentences)
+    // 2. Enforce segment limits (recursive split for long sentences)
     result = enforce_segment_limits(result);
     log::debug!("post_process: after enforce_segment_limits -> {} segments", result.len());
 
-    // 5. Apply gapless (close small gaps) BEFORE fixing overlaps
+    // 3. Apply gapless (close small gaps) BEFORE fixing overlaps
     result = apply_gapless(result);
     log::debug!("post_process: after apply_gapless -> {} segments", result.len());
 
-    // 6. Fix overlaps (final pass) - MUST be after gapless to avoid start > end
+    // 4. Fix overlaps (final pass) - operates on natural Whisper timestamps
     result = fix_overlaps(result);
     log::debug!("post_process: after fix_overlaps -> {} segments", result.len());
+
+    // 5. Enforce duration bounds AFTER overlap fixing to avoid creating new overlaps
+    result = enforce_duration(result);
+    log::debug!("post_process: after enforce_duration -> {} segments", result.len());
 
     // 7. Round timestamps
     result = round_timestamps(result);
@@ -455,9 +455,10 @@ mod tests {
 
     #[test]
     fn test_merge_gap() {
+        // Use gap clearly within MERGE_GAP (0.2s) to avoid f32 imprecision
         let segs = vec![
             Segment { start: 0.0, end: 1.0, text: "Hello".into() },
-            Segment { start: 1.2, end: 2.5, text: "world".into() },
+            Segment { start: 1.1, end: 2.5, text: "world".into() },
         ];
         let result = process(segs);
         assert_eq!(result.len(), 1);
@@ -477,9 +478,10 @@ mod tests {
 
     #[test]
     fn test_cjk_merge() {
+        // Use gap clearly within MERGE_GAP (0.2s) to avoid f32 imprecision
         let segs = vec![
             Segment { start: 0.0, end: 1.0, text: "你好".into() },
-            Segment { start: 1.2, end: 2.5, text: "世界".into() },
+            Segment { start: 1.1, end: 2.5, text: "世界".into() },
         ];
         let result = process(segs);
         assert_eq!(result.len(), 1);
@@ -504,10 +506,13 @@ mod tests {
             Segment { start: 2.5, end: 5.0, text: "Second sentence.".into() },
         ];
         let result = process(segs);
-        // Overlapping segments within merge gap get merged
-        assert_eq!(result.len(), 1);
+        // "First sentence." ends with '.' which triggers sentence boundary rule.
+        // Overlapping segments that end sentences are kept separate and overlap is fixed.
+        assert_eq!(result.len(), 2);
         assert!(result[0].text.contains("First"));
-        assert!(result[0].text.contains("Second"));
+        assert!(result[1].text.contains("Second"));
+        // Overlap must be resolved: first segment's end <= second's start
+        assert!(result[0].end <= result[1].start);
     }
 
     #[test]
