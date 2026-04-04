@@ -1,5 +1,4 @@
 mod cache;
-mod demucs;
 mod downloader;
 mod error;
 mod ffmpeg;
@@ -8,11 +7,10 @@ mod pipeline;
 mod model_manager;
 mod post_process;
 mod subtitle;
-mod subtitle_sync;
+mod sensevoice;
 mod thermal;
 mod utils;
 mod validator;
-mod whisper;
 
 use job_manager::JobManager;
 use pipeline::{PipelineOptions, PipelineResult};
@@ -56,23 +54,31 @@ async fn get_job_state(
     Ok(state.job_manager.state())
 }
 
-/// Check if a model file exists and is valid.
+/// Check if a specific model is ready.
 #[tauri::command]
-async fn check_model(model_name: String) -> Result<bool, error::AutoSubError> {
-    Ok(model_manager::ModelManager::verify_model(&model_name))
+async fn check_model(model_id: String) -> Result<bool, error::AutoSubError> {
+    Ok(model_manager::ModelManager::is_ready(&model_id))
 }
 
-/// List available verified models.
+/// List all models for UI.
 #[tauri::command]
-async fn list_models() -> Result<Vec<String>, error::AutoSubError> {
-    Ok(model_manager::ModelManager::list_models())
+async fn list_all_models() -> Result<Vec<model_manager::ModelInfo>, error::AutoSubError> {
+    Ok(model_manager::ModelManager::all_model_info())
+}
+
+/// List IDs of models that are downloaded and ready.
+#[tauri::command]
+async fn list_ready_models() -> Result<Vec<String>, error::AutoSubError> {
+    Ok(model_manager::ModelManager::list_ready_ids())
 }
 
 #[derive(serde::Serialize)]
 pub struct EnvironmentAudit {
     pub ffmpeg: bool,
-    pub whisper: bool,
+    pub sherpa_onnx: bool,
     pub ytdlp: bool,
+    pub vad_ready: bool,
+    pub ready_models: Vec<String>,
     pub models_dir: String,
 }
 
@@ -80,30 +86,19 @@ pub struct EnvironmentAudit {
 #[tauri::command]
 async fn audit_environment(app: AppHandle) -> Result<EnvironmentAudit, error::AutoSubError> {
     let ffmpeg_ok = app.shell().sidecar("ffmpeg").is_ok();
-    let whisper_ok = app.shell().sidecar("whisper-main").is_ok();
+    let sherpa_ok = app.shell().sidecar("sherpa-onnx").is_ok();
     let ytdlp_ok = app.shell().sidecar("yt-dlp").is_ok();
+    let vad_ok = model_manager::ModelManager::vad_ready();
+    let ready = model_manager::ModelManager::list_ready_ids();
 
     Ok(EnvironmentAudit {
         ffmpeg: ffmpeg_ok,
-        whisper: whisper_ok,
+        sherpa_onnx: sherpa_ok,
         ytdlp: ytdlp_ok,
+        vad_ready: vad_ok,
+        ready_models: ready,
         models_dir: model_manager::ModelManager::get_models_dir(),
     })
-}
-
-/// Apply point-based subtitle synchronization.
-///
-/// Uses two reference points to calculate a linear time transformation
-/// that is applied to all subtitle segments.
-#[tauri::command]
-async fn apply_subtitle_sync(
-    segments: Vec<subtitle::Segment>,
-    start_idx: usize,
-    shift_start_sec: f32,
-    end_idx: usize,
-    shift_end_sec: f32,
-) -> Result<Vec<subtitle::Segment>, error::AutoSubError> {
-    subtitle_sync::apply_point_sync(segments, start_idx, shift_start_sec, end_idx, shift_end_sec)
 }
 
 /// Export SRT content to a file.
@@ -143,10 +138,10 @@ pub fn run() {
             cancel_job,
             get_job_state,
             check_model,
-            list_models,
+            list_all_models,
+            list_ready_models,
             audit_environment,
             export_file,
-            apply_subtitle_sync,
             clear_cache,
             downloader::download_media,
         ])

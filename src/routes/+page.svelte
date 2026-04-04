@@ -5,11 +5,11 @@
   import { onMount, onDestroy } from "svelte";
   import {
     jobStore, isRunning, isIdle, hasResult, activeTab,
-    selectedLanguage, selectedModel, performanceMode,
+    selectedLanguage, selectedModelId, performanceMode,
     generateSRTContent, generateTXTContent,
   } from "$lib/jobStore";
   import { startPipeline, cancelJob, checkModel, exportFile, downloadMedia, auditEnvironment, type EnvironmentAudit } from "$lib/invoke";
-  import SyncTab from "$lib/SyncTab.svelte";
+  import ModelSelector from "$lib/ModelSelector.svelte";
 
   // ── State ────────────────────────────────────────────────────────────────────
   let videoPath = $state<string | null>(null);
@@ -96,7 +96,7 @@
     let currentPath = videoPath;
 
     // Verify model exists
-    const hasModel = await checkModel($selectedModel);
+    const hasModel = await checkModel($selectedModelId);
     if (!hasModel) {
       modelAvailable = false;
       return;
@@ -135,7 +135,7 @@
       const result = await startPipeline({
         video_path: currentPath,
         language: $selectedLanguage,
-        model: $selectedModel,
+        model_id: $selectedModelId,
         performance_mode: $performanceMode,
       });
       jobStore.setCompleted(result);
@@ -156,12 +156,7 @@
 
   // ── Export ────────────────────────────────────────────────────────────────────
   async function exportSRT() {
-    // Use synced segments if available, otherwise use current segments
-    const segments = $jobStore.syncedSegments.length > 0 
-      ? $jobStore.syncedSegments 
-      : $jobStore.segments;
-    
-    const content = generateSRTContent(segments);
+    const content = generateSRTContent($jobStore.segments);
     
     const path = await save({
       filters: [{ name: "SRT Subtitle", extensions: ["srt"] }],
@@ -171,12 +166,7 @@
   }
 
   async function exportTXT() {
-    // Use synced segments if available, otherwise use current segments
-    const segments = $jobStore.syncedSegments.length > 0 
-      ? $jobStore.syncedSegments 
-      : $jobStore.segments;
-    
-    const content = generateTXTContent(segments);
+    const content = generateTXTContent($jobStore.segments);
     
     const path = await save({
       filters: [{ name: "Text", extensions: ["txt"] }],
@@ -199,19 +189,13 @@
     return dur > 0 ? seg.text.length / dur : 0;
   }
 
-  // Reactive SRT content - uses synced segments if available
-  const srtPreviewContent = $derived.by(() => {
-    const segments = $jobStore.syncedSegments.length > 0 
-      ? $jobStore.syncedSegments 
-      : $jobStore.segments;
-    return generateSRTContent(segments);
-  });
+  const srtPreviewContent = $derived(generateSRTContent($jobStore.segments));
 </script>
 
 <!-- ── App Shell ─────────────────────────────────────────────────────────────── -->
 <div class="app">
   <!-- Environment Requirements Alert -->
-  {#if auditResult && (!auditResult.ffmpeg || !auditResult.whisper || !auditResult.ytdlp)}
+  {#if auditResult && (!auditResult.ffmpeg || !auditResult.sherpa_onnx || !auditResult.ytdlp || !auditResult.vad_ready)}
     <div class="fixed-overlay">
       <div class="audit-modal">
         <div class="audit-header">
@@ -234,10 +218,16 @@
               {auditResult.ffmpeg ? '✓ Found' : '✗ Missing'}
             </span>
           </li>
-          <li class="audit-item {auditResult.whisper ? 'success' : 'error'}">
-            <span class="audit-item-label">Whisper-Main</span>
+          <li class="audit-item {auditResult.sherpa_onnx ? 'success' : 'error'}">
+            <span class="audit-item-label">Sherpa-ONNX</span>
             <span class="audit-status">
-              {auditResult.whisper ? '✓ Found' : '✗ Missing'}
+              {auditResult.sherpa_onnx ? '✓ Found' : '✗ Missing'}
+            </span>
+          </li>
+          <li class="audit-item {auditResult.vad_ready ? 'success' : 'error'}">
+            <span class="audit-item-label">VAD Model</span>
+            <span class="audit-status">
+              {auditResult.vad_ready ? '✓ Found' : '✗ Missing'}
             </span>
           </li>
           <li class="audit-item {auditResult.ytdlp ? 'success' : 'error'}">
@@ -287,11 +277,6 @@
             <span class="badge">{$jobStore.segments.length}</span>
           {/if}
         </button>
-        <button
-          class="tab {$activeTab === 'sync' ? 'active' : ''} {!$hasResult ? 'disabled' : ''}"
-          onclick={() => $hasResult && ($activeTab = "sync")}
-        >
-          Sync
         </button>
       </nav>
     </div>
@@ -387,26 +372,19 @@
 
           <label class="field-label" for="lang-select">Language</label>
           <select id="lang-select" class="select" bind:value={$selectedLanguage}>
-            <option value="auto">Auto Detect</option>
-            <option value="zh">Chinese Simplified</option>
-            <option value="zh-tw">Chinese Traditional</option>
+            <option value="auto">Tự động nhận diện</option>
+            <option value="zh">Chinese Mandarin (普通话)</option>
+            <option value="yue">Cantonese (粤语)</option>
             <option value="en">English</option>
-            <option value="ja">Japanese</option>
-            <option value="ko">Korean</option>
+            <option value="ja">Japanese (日本語)</option>
+            <option value="ko">Korean (한국어)</option>
           </select>
 
-          <label class="field-label" for="model-select">Model</label>
-          <select id="model-select" class="select" bind:value={$selectedModel}>
-            <option value="base">Base (Fast · ~141MB)</option>
-            <option value="small">Small (~465MB)</option>
-            <option value="medium">Medium (~1.5GB)</option>
-            <option value="large-v2">Large v2 (Highest Accuracy · ~2.9GB)</option>
-            <option value="large-v3-turbo">Large v3 Turbo (Fast & Stable · ~1.6GB)</option>
-          </select>
+          <ModelSelector />
 
           {#if !modelAvailable}
             <div class="alert alert-error">
-              ⚠️ Model not found. Download it to <code>~/.autosub/models/</code>
+              ⚠️ Model not found or incomplete. Use the instruction above to download.
             </div>
           {/if}
 
@@ -512,9 +490,6 @@
     </div>
     {/if}
 
-    {#if $activeTab === "sync"}
-      <SyncTab {videoPath} />
-    {/if}
 
     <!-- ── TAB 2: REVIEW & EXPORT ─────────────────────────────────────────── -->
     {#if $activeTab === "review"}
@@ -554,7 +529,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each $jobStore.syncedSegments.length > 0 ? $jobStore.syncedSegments : $jobStore.segments as seg, i}
+            {#each $jobStore.segments as seg, i}
               {@const segCps = cps(seg)}
               <tr class="seg-row {segCps > 20 ? 'cps-warn' : ''}">
                 <td class="col-idx">{i + 1}</td>

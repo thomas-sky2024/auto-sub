@@ -1,7 +1,7 @@
 use crate::{
-    cache, demucs, error::{AutoSubError, Result},
+    cache, error::{AutoSubError, Result},
     ffmpeg, job_manager::JobManager, model_manager::ModelManager, post_process, subtitle,
-    thermal, validator, whisper,
+    thermal, validator, sensevoice,
 };
 use tauri_plugin_shell::ShellExt;
 use log::{info, warn};
@@ -23,10 +23,8 @@ pub struct ProgressPayload {
 pub struct PipelineOptions {
     pub video_path: String,
     pub language: String,
-    pub model: String,
+    pub model_id: String,
     pub performance_mode: thermal::PerformanceMode,
-    #[serde(default)]
-    pub isolate_vocals: bool,
 }
 
 /// Output of a completed pipeline run.
@@ -58,12 +56,25 @@ pub async fn run(
     job_mgr: Arc<JobManager>,
 ) -> Result<PipelineResult> {
     let video_path = &opts.video_path;
-    let model_name = &opts.model;
+    let model_id = &opts.model_id;
     let lang = &opts.language;
+
+    // Resolve model config
+    let model_config = ModelManager::get_config(model_id).ok_or_else(|| {
+        AutoSubError::WhisperDecode(format!("Unknown model ID: {}", model_id))
+    })?;
+
+    // Validate model files exist
+    if !ModelManager::is_ready(model_id) {
+        return Err(AutoSubError::WhisperDecode(format!(
+            "Model '{}' is not ready (VAD or model files missing). Please run setup-models.sh",
+            model_id
+        )));
+    }
 
     // ── Stage 0: Check cache ──────────────────────────────────────────────────
     emit_progress(&app, "Checking cache", 2.0, 0);
-    if let Ok(Some(cached_srt)) = cache::check_cache(video_path, model_name, lang) {
+    if let Ok(Some(cached_srt)) = cache::check_cache(video_path, model_id, lang) {
         let srt_content = tokio::fs::read_to_string(&cached_srt).await.map_err(|e| {
             AutoSubError::Cache(format!("Failed to read cached SRT: {}", e))
         })?;
@@ -86,29 +97,10 @@ pub async fn run(
         });
     }
 
-    // Try to get ffprobe sidecar if it exists, otherwise fall back to ffmpeg search
     let ffprobe_sidecar = app.shell().sidecar("ffprobe").ok();
-
-    // Validate model exists before proceeding
-    if !ModelManager::verify_model(model_name) {
-        return Err(AutoSubError::WhisperDecode(format!(
-            "Model '{}' not found or invalid. Please check that the model is downloaded to {}",
-            model_name,
-            ModelManager::get_models_dir()
-        )));
-    }
-
-    let model_path = ModelManager::get_model_path(model_name).to_string_lossy().to_string();
-
-    info!("pipeline: sidecars resolved successfully");
-    info!("pipeline: using model at {}", model_path);
-
-    // Get video duration for progress calculation
-    // If ffprobe sidecar is missing, we try to use the ffmpeg sidecar path as a base
     let duration_secs = if let Some(ffp) = ffprobe_sidecar {
         ffmpeg::get_video_duration(ffp, video_path).await.unwrap_or(0.0)
     } else {
-        // Fallback or just return 0.0 for now
         warn!("ffprobe sidecar not found, duration might be inaccurate");
         0.0
     };
@@ -116,7 +108,7 @@ pub async fn run(
     // ── Stage 1: Audio extraction ─────────────────────────────────────────────
     emit_progress(&app, "Extracting audio", 5.0, 0);
     job_mgr.update_progress("Extracting audio", 5.0);
-    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Extracting)?;
+    cache::update_state(video_path, model_id, lang, duration_secs, cache::PipelineState::Extracting)?;
 
     // Set up audio output path
     let cache_dir = cache::cache_dir(video_path)?;
@@ -152,50 +144,22 @@ pub async fn run(
         ).await
     }, 2).await?;
 
-    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Extracted)?;
+    cache::update_state(video_path, model_id, lang, duration_secs, cache::PipelineState::Extracted)?;
 
-    // ── STAGE 1.5: Vocal Separation (Demucs) ──────────────────────────────────
-    let mut final_audio_for_whisper = audio_path.clone();
-
-    if opts.isolate_vocals {
-        emit_progress(&app, "Separating vocals", 20.0, 0);
-        job_mgr.update_progress("Separating vocals", 20.0);
-        cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Processing)?;
-
-        let demucs_sidecar = app.shell().sidecar("demucs-main").map_err(|e|
-            AutoSubError::SidecarNotFound(format!("demucs-main sidecar not found: {}", e))
-        )?;
-
-        let demucs_model_path = ModelManager::get_demucs_model_path().to_string_lossy().to_string();
-
-        match demucs::separate_vocals(
-            demucs_sidecar,
-            &audio_path,
-            &cache_dir.to_string_lossy().to_string(),
-            &demucs_model_path,
-        ).await {
-            Ok(vocals_path) => {
-                info!("pipeline: vocals separated successfully, using {}", vocals_path);
-                final_audio_for_whisper = vocals_path;
-            }
-            Err(e) => {
-                warn!("pipeline: vocal separation failed ({}), continuing with original audio", e);
-                // Fall back to original audio if demucs fails
-            }
-        }
-    }
+    // ── STAGE 1.5: Vocal Separation (Removed in favor of SenseVoice) ─────────
+    let final_audio = audio_path.clone();
 
     emit_progress(&app, "Transcribing", 35.0, 0);
     job_mgr.update_progress("Transcribing", 35.0);
-    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Transcribing)?;
+    cache::update_state(video_path, model_id, lang, duration_secs, cache::PipelineState::Transcribing)?;
 
-    // ── Stage 2: Whisper transcription ────────────────────────────────────────
+    // ── Stage 2: SenseVoice transcription ─────────────────────────────────────
     let threads = thermal::recommended_threads(opts.performance_mode);
     let output_dir = cache_dir.to_string_lossy().to_string();
 
-    // Run whisper with retry and fallback
-    let raw_segments = match crate::utils::retry(|| async {
-        let (tx, mut rx) = mpsc::channel::<whisper::WhisperProgress>(32);
+    // Run sensevoice with retry
+    let raw_segments = crate::utils::retry(|| async {
+        let (tx, mut rx) = mpsc::channel::<sensevoice::SenseVoiceProgress>(32);
         let app_clone = app.clone();
         let jm_clone = job_mgr.clone();
         tokio::spawn(async move {
@@ -206,62 +170,29 @@ pub async fn run(
             }
         });
 
-        let sidecar = app.shell().sidecar("whisper-main").map_err(|e| 
-            AutoSubError::SidecarNotFound(format!("whisper-main sidecar not found: {}", e))
+        let sidecar = app.shell().sidecar("sherpa-onnx").map_err(|e| 
+            AutoSubError::SidecarNotFound(format!("sherpa-onnx sidecar not found: {}", e))
         )?;
 
         info!(
-            "Transcription stage: using model '{}' with whisper-main sidecar",
-            model_name
+            "Transcription stage: starting transcription via sherpa-onnx for model {}", model_id
         );
 
-        whisper::transcribe(
+        sensevoice::transcribe(
             sidecar,
-            &model_path,
-            &final_audio_for_whisper,
-            &output_dir,
-            lang,
+            &model_config,
+            &ModelManager::vad_model_path().to_string_lossy(),
+            &final_audio,
             threads,
             Some(tx),
         ).await
-    }, 2).await {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(
-                "Primary model '{}' failed or not found, attempting fallback to 'small' model: {}",
-                model_name, e
-            );
+    }, 2).await?;
 
-            // Use ModelManager to construct fallback path properly
-            if ModelManager::verify_model("small") {
-                let small_model_path = ModelManager::get_model_path("small").to_string_lossy().to_string();
-                let sidecar = app.shell().sidecar("whisper-main").map_err(|e| 
-                    AutoSubError::SidecarNotFound(format!("whisper-main sidecar not found: {}", e))
-                )?;
-
-                whisper::transcribe(
-                    sidecar,
-                    &small_model_path,
-                    &final_audio_for_whisper,
-                    &output_dir,
-                    lang,
-                    threads,
-                    None,
-                ).await?
-            } else {
-                return Err(AutoSubError::WhisperDecode(format!(
-                    "Primary model '{}' failed and fallback model 'small' not available. {}",
-                    model_name, e
-                )));
-            }
-        }
-    };
-
-    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Transcribed)?;
+    cache::update_state(video_path, model_id, lang, duration_secs, cache::PipelineState::Transcribed)?;
 
     emit_progress(&app, "Validating", 80.0, raw_segments.len());
     job_mgr.update_progress("Validating", 80.0);
-    cache::update_state(video_path, model_name, lang, duration_secs, cache::PipelineState::Validating)?;
+    cache::update_state(video_path, model_id, lang, duration_secs, cache::PipelineState::Validating)?;
 
     // ── Stage 3: Validation ───────────────────────────────────────────────────
     let validated = validator::validate(raw_segments);

@@ -26,7 +26,7 @@
     {
       "identifier": "shell:allow-execute",
       "args": true,
-      "name": "binaries/whisper-main"
+      "name": "binaries/sherpa-onnx"
     },
     {
       "identifier": "shell:allow-execute",

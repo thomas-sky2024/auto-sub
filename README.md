@@ -1,6 +1,6 @@
 # 🎬 AutoSub — Native macOS Subtitle Generator
 
-AutoSub is a production-grade, high-performance desktop application for generating subtitles from video files. Built specifically for **Intel Core i9 MacBook Pro (2019)** hardware using **Tauri v2**, **Rust**, and **whisper.cpp**, it provides a seamless, streaming-first experience with professional-grade accuracy.
+AutoSub is a production-grade, high-performance desktop application for generating subtitles from video files. Built specifically for **Intel Core i9 MacBook Pro (2019)** hardware using **Tauri v2**, **Rust**, and **SenseVoice-Small** (via `sherpa-onnx`), it provides a seamless, streaming-first experience with professional-grade accuracy.
 
 ![AutoSub UI Placeholder](https://via.placeholder.com/1200x800.png?text=AutoSub+Premium+Svelte+UI)
 
@@ -8,14 +8,14 @@ AutoSub is a production-grade, high-performance desktop application for generati
 
 - **5-Stage Fault-Tolerant Pipeline**: 
     - `FFmpeg Extraction` (Streaming audio directly via pipe)
-    - `Whisper Decoding` (whisper.cpp with VAD for silence suppression)
+    - `SenseVoice transcription` (SenseVoice-Small via sherpa-onnx with VAD)
     - `Validation Layer` (Fixing overlaps, dropping high-CPS errors)
     - `Pro-Grade Post-Processing` (CJK-aware, context merging, speaker pause detection)
     - `Multi-Format Export` (SRT/TXT with live preview)
 - **Intel i9 Optimization**:
-    - Build flags tuned for Coffee Lake architecture (`AVX512=OFF` to prevent crashes).
+    - Build flags tuned for Coffee Lake architecture.
     - **Adaptive Thermal Control**: Dynamically adjusts thread count based on real-time CPU load and thermal state.
-    - **Balanced/MaxSpeed Modes**: Toggle between 8 and 12-core parallel processing.
+    - **Balanced/MaxSpeed Modes**: Toggle between 4 and 8-core parallel processing (SenseVoice is optimized for multi-threading).
 - **Commercial-Grade Subtitles**:
     - **CPS Control**: Automatically splits fast-speech segments for comfortable reading.
     - **CJK-Aware**: Handles Chinese/Japanese/Korean without whitespace-splitting bugs, using unicode grapheme boundaries.
@@ -26,7 +26,7 @@ AutoSub is a production-grade, high-performance desktop application for generati
 
 - **Framework**: [Tauri v2.1.0](https://tauri.app/)
 - **Backend**: [Rust](https://www.rust-lang.org/)
-- **Audio Engine**: [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (v1.8.4 CLI Sidecar)
+- **Audio Engine**: [SenseVoice-Small](https://github.com/FunAudioLLM/SenseVoice) + [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)
 - **Frontend**: [Svelte v5](https://svelte.dev/) + [Vite](https://vite.dev/)
 - **Styling**: Modern CSS with Glassmorphism and Stage-aware UI.
 
@@ -35,7 +35,7 @@ AutoSub is a production-grade, high-performance desktop application for generati
 ### Prerequisites
 
 - macOS (Intel or Apple Silicon)
-- `pnpm`, `cargo`, `cmake`
+- `pnpm`, `cargo`
 - `ffmpeg` installed on system (for development)
 
 ### Installation
@@ -46,13 +46,13 @@ AutoSub is a production-grade, high-performance desktop application for generati
    cd auto-sub
    ```
 
-2. **Build whisper.cpp sidecar**:
+2. **Download sherpa-onnx sidecar**:
    ```bash
    chmod +x build-scripts/*.sh
-   ./build-scripts/build-whisper.sh
+   ./build-scripts/build-sensevoice.sh
    ```
 
-3. **Setup Whisper models**:
+3. **Setup SenseVoice models**:
    ```bash
    ./build-scripts/setup-models.sh
    ```

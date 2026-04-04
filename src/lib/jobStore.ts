@@ -11,7 +11,6 @@ interface JobStore {
   error: string | null;
   segments: Segment[];
   originalSegments: Segment[];
-  syncedSegments: Segment[];
   srtContent: string;
   txtContent: string;
   fromCache: boolean;
@@ -27,7 +26,6 @@ const initialState: JobStore = {
   error: null,
   segments: [],
   originalSegments: [],
-  syncedSegments: [],
   srtContent: "",
   txtContent: "",
   fromCache: false,
@@ -56,7 +54,6 @@ function createJobStore() {
         percent: 100,
         segments: result.segments,
         originalSegments: [...result.segments],
-        syncedSegments: [],
         srtContent: result.srt_content,
         txtContent: result.txt_content,
         fromCache: result.from_cache,
@@ -82,9 +79,6 @@ function createJobStore() {
 
     setSegments: (segments: Segment[]) =>
       update((s) => ({ ...s, segments })),
-
-    setSyncedSegments: (segments: Segment[]) =>
-      update((s) => ({ ...s, syncedSegments: segments, segments: [...segments] })),
   };
 }
 
@@ -124,6 +118,7 @@ export function generateTXTContent(segments: Segment[]): string {
 
 // ── UI Settings ───────────────────────────────────────────────────────────────
 export const selectedLanguage = writable<string>("auto");
-export const selectedModel = writable<string>("large-v3-turbo");
+export const selectedModelId = writable<string>("sense-voice-2024");
 export const performanceMode = writable<"Balanced" | "MaxSpeed">("Balanced");
-export const activeTab = writable<"transcribe" | "sync" | "review">("transcribe");
+export const activeTab = writable<"transcribe" | "review">("transcribe");
+

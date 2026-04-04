@@ -36,10 +36,10 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "binaries/whisper-main",
+      "binaries/sherpa-onnx",
       "binaries/ffmpeg",
-      "binaries/yt-dlp",
-      "binaries/demucs-main"
+      "binaries/ffprobe",
+      "binaries/yt-dlp"
     ],
     "macOS": {
       "frameworks": [],
